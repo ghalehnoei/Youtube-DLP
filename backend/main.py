@@ -984,6 +984,7 @@ async def process_upload(
         job_manager.update_job_status(job_id, "upload", 0, "Converting video to 1920x1080...")
         
         # Convert video to 1920x1080
+        print(f"Upload job {job_id}: Starting conversion of {input_file_path}")
         try:
             converted_file_path = await converter.convert_to_horizontal(
                 input_file_path=input_file_path,
@@ -993,8 +994,12 @@ async def process_upload(
                 cancellation_check=lambda: job_manager.is_cancelled(job_id),
                 job_id=job_id
             )
+            print(f"Upload job {job_id}: Conversion result: {converted_file_path}")
         except Exception as e:
             error_str = str(e) if e else "Unknown error"
+            print(f"Upload job {job_id}: Conversion exception: {error_str}")
+            import traceback
+            traceback.print_exc()
             job_manager.update_job_status(
                 job_id, "error", 0, f"Failed to convert video: {error_str}"
             )
@@ -1007,7 +1012,13 @@ async def process_upload(
             return
         
         if not converted_file_path:
-            job_manager.update_job_status(job_id, "error", 0, "Conversion failed: No output file created")
+            # Check if FFmpeg is available
+            if not converter.ffmpeg_path:
+                error_msg = "Conversion failed: FFmpeg is not installed or not found in PATH. Please install FFmpeg to enable video conversion."
+            else:
+                error_msg = "Conversion failed: No output file created. Check backend logs for FFmpeg error details."
+            print(f"Upload job {job_id}: {error_msg}")
+            job_manager.update_job_status(job_id, "error", 0, error_msg)
             # Clean up input file
             try:
                 if Path(input_file_path).exists():
