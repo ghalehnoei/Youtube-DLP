@@ -1,7 +1,11 @@
 import React from 'react';
-import RTLText from './RTLText';
+import { useDarkMode } from '../contexts/DarkModeContext';
+
+const APP_NAME = process.env.REACT_APP_NAME || 'RAFO VIDEO Downloader';
 
 const MainLayout = ({ children, searchQuery, onSearchChange, onNewDownload, showSidebar = true }) => {
+  const { isDarkMode, toggleDarkMode } = useDarkMode();
+
   return (
     <div className="main-layout">
       {/* Header */}
@@ -10,7 +14,7 @@ const MainLayout = ({ children, searchQuery, onSearchChange, onNewDownload, show
           <div className="header-left">
             <div className="logo">
               <span className="logo-icon">🎥</span>
-              <span className="logo-text">Youtube Downloader</span>
+              <span className="logo-text">{APP_NAME}</span>
             </div>
             <button className="login-btn">ورود به سیستم</button>
           </div>
@@ -35,8 +39,8 @@ const MainLayout = ({ children, searchQuery, onSearchChange, onNewDownload, show
           
           <div className="header-right">
             <nav className="header-nav">
-              <a href="#" className="nav-link">برای شما</a>
-              <a href="#" className="nav-link">پخش زنده</a>
+              <button type="button" className="nav-link">برای شما</button>
+              <button type="button" className="nav-link">پخش زنده</button>
               <button onClick={onNewDownload} className="nav-link new-video-btn">
                 ➕ ویدیو جدید
               </button>
@@ -64,22 +68,22 @@ const MainLayout = ({ children, searchQuery, onSearchChange, onNewDownload, show
         {showSidebar && (
         <aside className="sidebar">
           <nav className="sidebar-nav">
-            <a href="#" className="sidebar-item active">
+            <button type="button" className="sidebar-item active">
               <span className="sidebar-icon">🏠</span>
               <span>خانه</span>
-            </a>
-            <a href="#" className="sidebar-item">
+            </button>
+            <button type="button" className="sidebar-item">
               <span className="sidebar-icon">📺</span>
               <span>پخش زنده</span>
-            </a>
-            <a href="#" className="sidebar-item">
+            </button>
+            <button type="button" className="sidebar-item">
               <span className="sidebar-icon">📺</span>
               <span>مرور کانال‌ها</span>
-            </a>
-            <a href="#" className="sidebar-item">
+            </button>
+            <button type="button" className="sidebar-item">
               <span className="sidebar-icon">⭐</span>
               <span>برای شما</span>
-            </a>
+            </button>
           </nav>
           
           <div className="sidebar-section">
@@ -94,7 +98,11 @@ const MainLayout = ({ children, searchQuery, onSearchChange, onNewDownload, show
             <div className="settings-item">
               <span>حالت شب</span>
               <label className="toggle-switch">
-                <input type="checkbox" />
+                <input 
+                  type="checkbox" 
+                  checked={isDarkMode}
+                  onChange={toggleDarkMode}
+                />
                 <span className="toggle-slider"></span>
               </label>
             </div>

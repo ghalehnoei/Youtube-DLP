@@ -59,32 +59,32 @@
 
 .saved-files-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(313px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 16px;
-  padding: 0;
+  padding: 24px;
 }
 
 @media (min-width: 2000px) {
   .saved-files-grid {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
   }
 }
 
 @media (min-width: 1700px) and (max-width: 1999px) {
   .saved-files-grid {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
   }
 }
 
 @media (min-width: 1400px) and (max-width: 1699px) {
   .saved-files-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
   }
 }
 
 @media (min-width: 1000px) and (max-width: 1399px) {
   .saved-files-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
@@ -108,7 +108,7 @@
   border-radius: 12px;
   overflow: hidden;
   cursor: pointer;
-  margin-bottom: 0;
+  margin-bottom: 12px;
 }
 
 .video-thumbnail {
@@ -183,6 +183,11 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .video-title {
+  color: #ffffff;
 }
 
 .video-title:hover {
@@ -192,6 +197,11 @@
 .video-meta-card {
   font-size: 0.8125rem;
   color: #606060;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .video-meta-card {
+  color: #aaaaaa;
 }
 
 .video-channel {

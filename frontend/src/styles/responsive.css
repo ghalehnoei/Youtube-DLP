@@ -29,6 +29,14 @@
     max-height: 400px;
   }
 
+  .player-video-section {
+    max-width: 100%;
+  }
+
+  .player-main-section {
+    max-width: 100%;
+  }
+
   .player-page-wrapper {
     padding: 0;
   }
@@ -90,6 +98,7 @@
 
   .saved-files-grid {
     grid-template-columns: 1fr;
+    padding: 16px;
   }
 
   .saved-files-header {

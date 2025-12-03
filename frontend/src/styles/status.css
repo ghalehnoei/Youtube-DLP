@@ -1,22 +1,37 @@
 /* Status and Progress Styles */
 .status-container {
   margin: 0;
-  padding: 16px 0;
+  padding: 24px 0;
+  width: 100%;
 }
 
 .status-card {
-  background: rgba(255, 255, 255, 0.8);
-  backdrop-filter: blur(10px);
-  border-radius: 20px;
+  background: #ffffff;
+  border-radius: 16px;
   padding: 32px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  width: 100%;
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.dark-mode .status-card {
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
 .status-card h2 {
   color: #333;
-  margin-bottom: 20px;
+  margin-bottom: 24px;
   font-size: 1.5rem;
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+  font-weight: 600;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .status-card h2 {
+  color: #ffffff;
 }
 
 .progress-section {
@@ -25,18 +40,26 @@
 
 .progress-section h3 {
   color: #555;
-  margin-bottom: 15px;
+  margin-bottom: 16px;
   font-size: 1.2rem;
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+  font-weight: 500;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .progress-section h3 {
+  color: #ffffff;
 }
 
 .progress-bar-container {
   width: 100%;
-  height: 12px;
+  height: 16px;
   background: #e2e8f0;
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   position: relative;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .progress-bar {
@@ -63,18 +86,51 @@
   background: linear-gradient(90deg, #f093fb 0%, #f5576c 100%);
 }
 
+.progress-bar.connecting {
+  background: linear-gradient(90deg, #94a3b8 0%, #64748b 100%);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
 .progress-info {
   display: flex;
   gap: 20px;
   color: #666;
   font-size: 0.9rem;
-  margin-bottom: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .progress-info {
+  color: #cccccc;
+}
+
+.progress-info span {
+  font-weight: 500;
 }
 
 .status-message {
   color: #555;
   font-size: 0.95rem;
-  margin-top: 10px;
+  margin-top: 12px;
+  margin-bottom: 16px;
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+  line-height: 1.5;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .status-message {
+  color: #cccccc;
 }
 
 .error-box {
@@ -84,11 +140,22 @@
   padding: 20px;
   margin-bottom: 20px;
   backdrop-filter: blur(10px);
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+.dark-mode .error-box {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(220, 38, 38, 0.2) 100%);
+  border-color: rgba(239, 68, 68, 0.5);
 }
 
 .error-box h3 {
   color: #c33;
   margin-bottom: 10px;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .error-box h3 {
+  color: #ff6b6b;
 }
 
 .error-section {

@@ -23,6 +23,22 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background: #f9f9f9;
   min-height: 100vh;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Dark Mode Styles */
+.dark-mode body {
+  background: #0f0f0f;
+  color: #ffffff;
+}
+
+.dark-mode .App {
+  background: #0f0f0f;
+}
+
+.dark-mode .container {
+  background: #1a1a1a;
+  color: #ffffff;
 }
 
 .App {
@@ -37,7 +53,7 @@ body {
   background: #ffffff;
   border-radius: 0;
   box-shadow: none;
-  padding: 24px;
+  padding: 0;
   animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
   border: none;
 }
@@ -63,5 +79,10 @@ body {
   padding: 40px;
   color: #666;
   font-size: 1.1rem;
+  transition: color 0.3s ease;
+}
+
+.dark-mode .loading {
+  color: #aaaaaa;
 }
 

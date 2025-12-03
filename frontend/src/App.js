@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 
@@ -17,8 +17,14 @@ import { useVideoPlayer } from './hooks/useVideoPlayer';
 import { useStoryboard } from './hooks/useStoryboard';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const APP_NAME = process.env.REACT_APP_NAME || 'RAFO VIDEO Downloader';
 
 function App() {
+  // Set document title
+  useEffect(() => {
+    document.title = APP_NAME;
+  }, []);
+
   // State management
   const [url, setUrl] = useState('');
   const [jobId, setJobId] = useState(null);
@@ -41,6 +47,9 @@ function App() {
   const [showCreatePlaylist, setShowCreatePlaylist] = useState(false);
   const [selectedPlaylistFilter, setSelectedPlaylistFilter] = useState(null);
 
+  // Track auto-saved job IDs to prevent duplicate saves
+  const autoSavedJobIdsRef = useRef(new Set());
+
   // Custom hooks
   const handleVideoLoadedMetadata = (e) => {
     const video = e.target;
@@ -54,7 +63,7 @@ function App() {
     }
   };
 
-  const { videoContainerRef, videoRef, seekToTimestamp } = useVideoPlayer(
+  const { videoContainerRef, seekToTimestamp } = useVideoPlayer(
     s3Url,
     videoDuration,
     handleVideoLoadedMetadata
@@ -78,7 +87,7 @@ function App() {
         }
       }
     } else if (data.stage === 'error') {
-      setError(data.message || 'An error occurred');
+      setError(data.message || 'خطایی رخ داد');
     }
   }, []);
 
@@ -127,7 +136,7 @@ function App() {
     e.preventDefault();
     
     if (!url.trim()) {
-      setError('Please enter a valid URL');
+      setError('لطفاً یک آدرس معتبر وارد کنید');
       return;
     }
 
@@ -143,7 +152,7 @@ function App() {
       });
       setJobId(response.data.job_id);
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Failed to start download';
+      const errorMessage = err.response?.data?.detail || err.message || 'شروع دانلود با خطا مواجه شد';
       setError(errorMessage);
       console.error('Error starting download:', err);
     }
@@ -154,7 +163,7 @@ function App() {
     if (!file) return;
     
     if (!file.type.startsWith('video/')) {
-      setError('Please select a video file');
+      setError('لطفاً یک فایل ویدیو انتخاب کنید');
       return;
     }
 
@@ -173,7 +182,7 @@ function App() {
       });
       setJobId(response.data.job_id);
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Failed to upload file';
+      const errorMessage = err.response?.data?.detail || err.message || 'آپلود فایل با خطا مواجه شد';
       setError(errorMessage);
       console.error('Error uploading file:', err);
       setFileUploadName(null);
@@ -187,7 +196,7 @@ function App() {
       setStatus({ ...status, stage: 'cancelled', message: 'Download cancelled' });
     } catch (err) {
       console.error('Error cancelling job:', err);
-      setError('Failed to cancel download');
+      setError('لغو دانلود با خطا مواجه شد');
     }
   };
 
@@ -202,6 +211,8 @@ function App() {
     setVideoHeight(null);
     setShowNewDownload(false);
     setFileUploadName(null);
+    // Clear auto-saved tracking when resetting
+    autoSavedJobIdsRef.current.clear();
   };
 
   const handleBackToMain = () => {
@@ -211,17 +222,50 @@ function App() {
     }
   };
 
-  const handleSaveMetadata = () => {
-    if (!s3Url || !status || !status.metadata) return;
-    
-    const isAlreadySaved = savedFiles.some(file => file.s3_url === s3Url || file.job_id === jobId);
-    if (isAlreadySaved) {
-      setError('This video is already saved');
-      return;
-    }
-    
-    setShowPlaylistModal(true);
-  };
+  // Auto-save when download is complete
+  useEffect(() => {
+    const autoSave = async () => {
+      if (!s3Url || !status || status.stage !== 'complete' || !status.metadata || !jobId) {
+        return;
+      }
+      
+      // Check if already auto-saved for this job (prevent duplicate saves)
+      if (autoSavedJobIdsRef.current.has(jobId)) {
+        return;
+      }
+      
+      try {
+        const metadata = {
+          s3_url: s3Url,
+          job_id: jobId,
+          metadata: status.metadata,
+          video_width: videoWidth,
+          video_height: videoHeight,
+          thumbnail_url: status.metadata?.thumbnail_url || null,
+          playlist_id: null, // Auto save without playlist
+          created_at: new Date().toISOString()
+        };
+        
+        // Mark as auto-saved BEFORE making the API call to prevent duplicate saves
+        autoSavedJobIdsRef.current.add(jobId);
+        
+        await axios.post(`${API_BASE_URL}/api/files`, metadata);
+        await loadSavedFiles();
+      } catch (err) {
+        // If save failed, remove from ref so it can be retried
+        autoSavedJobIdsRef.current.delete(jobId);
+        console.error('Error auto-saving file:', err);
+        // Don't show error to user for auto-save
+      }
+    };
+
+    // Delay auto-save slightly to ensure all state is updated
+    const timer = setTimeout(() => {
+      autoSave();
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [s3Url, status, jobId, videoWidth, videoHeight, loadSavedFiles]);
 
   const handleConfirmSave = async () => {
     if (!s3Url || !status || !status.metadata) return;
@@ -252,7 +296,7 @@ function App() {
       setVideoWidth(null);
       setVideoHeight(null);
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Failed to save file';
+      const errorMessage = err.response?.data?.detail || err.message || 'ذخیره فایل با خطا مواجه شد';
       setError(errorMessage);
       console.error('Error saving file:', err);
     }
@@ -260,7 +304,7 @@ function App() {
 
   const handleCreatePlaylist = async () => {
     if (!newPlaylistTitle.trim()) {
-      setError('Playlist title is required');
+      setError('عنوان پلی‌لیست الزامی است');
       return;
     }
     
@@ -279,7 +323,7 @@ function App() {
       setShowCreatePlaylist(false);
       setError(null);
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Failed to create playlist';
+      const errorMessage = err.response?.data?.detail || err.message || 'ایجاد پلی‌لیست با خطا مواجه شد';
       setError(errorMessage);
       console.error('Error creating playlist:', err);
     }
@@ -290,7 +334,7 @@ function App() {
       await axios.delete(`${API_BASE_URL}/api/files/${fileId}`);
       await loadSavedFiles();
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Failed to delete file';
+      const errorMessage = err.response?.data?.detail || err.message || 'حذف فایل با خطا مواجه شد';
       setError(errorMessage);
       console.error('Error deleting file:', err);
     }
@@ -304,7 +348,7 @@ function App() {
     setStatus({ 
       stage: 'complete', 
       percent: 100, 
-      message: 'Loaded from saved files',
+      message: 'از فایل‌های ذخیره شده بارگذاری شد',
       metadata: file?.metadata || {}
     });
     setShowNewDownload(false);
@@ -319,9 +363,12 @@ function App() {
     }
   };
 
-  const showSavedFiles = savedFiles.length > 0 && !showNewDownload && !jobId && !status;
-  const showDownloadForm = (!savedFiles.length || showNewDownload) && !jobId && !status;
-  const showVideoPlayer = (url.trim() || s3Url) && !error;
+  const showSavedFiles = savedFiles.length > 0 && !showNewDownload && !jobId && !status && !s3Url;
+  // Show download form when: (no saved files OR new download clicked) AND job is not complete
+  const isJobComplete = status && status.stage === 'complete';
+  const showDownloadForm = (!savedFiles.length || showNewDownload) && !isJobComplete;
+  // Show video player when: has URL or S3 URL AND status is complete AND no error
+  const showVideoPlayer = (url.trim() || s3Url) && isJobComplete && !error;
 
   return (
     <div className="App">
@@ -353,15 +400,60 @@ function App() {
           onNewDownload={() => {}}
           showSidebar={false}
         >
-          <DownloadForm
-            url={url}
-            setUrl={setUrl}
-            onSubmit={handleSubmit}
-            onFileUpload={handleFileUpload}
-            fileUploadName={fileUploadName}
-            showBackButton={savedFiles.length > 0}
-            onBack={handleBackToMain}
-          />
+          <div className="download-page-content">
+            {/* Show error if exists and no active job */}
+            {error && !jobId && !status && (
+              <div className="error-box">
+                <h3>❌ خطا</h3>
+                <p><RTLText>{error}</RTLText></p>
+                <button onClick={handleReset} className="reset-btn">
+                  تلاش مجدد
+                </button>
+              </div>
+            )}
+
+            {/* Show status/progress if job is active or status exists */}
+            {(jobId || status) && (
+              <StatusDisplay
+                status={
+                  status || {
+                    stage: 'connecting',
+                    message: 'در حال اتصال به سرور...',
+                    percent: 0
+                  }
+                }
+                onCancel={
+                  status &&
+                  status.stage !== 'complete' &&
+                  status.stage !== 'error' &&
+                  status.stage !== 'cancelled'
+                    ? handleCancel
+                    : null
+                }
+                onReset={handleReset}
+              />
+            )}
+
+            {/* Show error in status if status has error */}
+            {status && status.stage === 'error' && error && (
+              <div className="error-box" style={{ marginTop: '16px' }}>
+                <p><RTLText>{error}</RTLText></p>
+              </div>
+            )}
+
+            {/* Show form only when no active job and no status */}
+            {!jobId && !status && (
+              <DownloadForm
+                url={url}
+                setUrl={setUrl}
+                onSubmit={handleSubmit}
+                onFileUpload={handleFileUpload}
+                fileUploadName={fileUploadName}
+                showBackButton={savedFiles.length > 0}
+                onBack={handleBackToMain}
+              />
+            )}
+          </div>
         </MainLayout>
       )}
 
@@ -372,66 +464,31 @@ function App() {
           onNewDownload={() => {}}
           showSidebar={false}
         >
-          <VideoPlayer
-            url={url}
-            s3Url={s3Url}
-            status={status}
-            videoDuration={videoDuration}
-            videoWidth={videoWidth}
-            videoHeight={videoHeight}
-            savedFiles={savedFiles}
-            jobId={jobId}
-            videoContainerRef={videoContainerRef}
-            storyboardFrames={storyboardFrames}
-            onSave={handleSaveMetadata}
-            onBack={handleBackToMain}
-            onSeek={seekToTimestamp}
-          />
-        </MainLayout>
-      )}
-
-      {error && (showDownloadForm || showVideoPlayer) && (
-        <MainLayout
-          searchQuery=""
-          onSearchChange={() => {}}
-          onNewDownload={() => {}}
-          showSidebar={false}
-        >
-          <div className="error-box">
-            <h3>❌ Error</h3>
-            <p><RTLText>{error}</RTLText></p>
-            <button onClick={handleReset} className="reset-btn">
-              Try Again
-            </button>
-          </div>
-        </MainLayout>
-      )}
-
-      {status && (showDownloadForm || showVideoPlayer) && (
-        <MainLayout
-          searchQuery=""
-          onSearchChange={() => {}}
-          onNewDownload={() => {}}
-          showSidebar={false}
-        >
-          <StatusDisplay
-            status={status}
-            onCancel={handleCancel}
-            onReset={handleReset}
-          />
-        </MainLayout>
-      )}
-
-      {jobId && !status && (showDownloadForm || showVideoPlayer) && (
-        <MainLayout
-          searchQuery=""
-          onSearchChange={() => {}}
-          onNewDownload={() => {}}
-          showSidebar={false}
-        >
-          <div className="loading">
-            <p>Connecting to server...</p>
-          </div>
+          {error && (
+            <div className="error-box">
+              <h3>❌ خطا</h3>
+              <p><RTLText>{error}</RTLText></p>
+              <button onClick={handleReset} className="reset-btn">
+                تلاش مجدد
+              </button>
+            </div>
+          )}
+          {!error && (
+            <VideoPlayer
+              url={url}
+              s3Url={s3Url}
+              status={status}
+              videoDuration={videoDuration}
+              videoWidth={videoWidth}
+              videoHeight={videoHeight}
+              savedFiles={savedFiles}
+              jobId={jobId}
+              videoContainerRef={videoContainerRef}
+              storyboardFrames={storyboardFrames}
+              onBack={handleBackToMain}
+              onSeek={seekToTimestamp}
+            />
+          )}
         </MainLayout>
       )}
 

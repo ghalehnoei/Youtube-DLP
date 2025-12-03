@@ -17,7 +17,7 @@ const SavedFilesList = ({
   const filteredFiles = savedFiles.filter(file => {
     if (!searchQuery.trim()) return true;
     const query = searchQuery.toLowerCase();
-    const title = (file.metadata?.title || 'Untitled Video').toLowerCase();
+    const title = (file.metadata?.title || 'ویدیو بدون عنوان').toLowerCase();
     const uploader = (file.metadata?.uploader || '').toLowerCase();
     return title.includes(query) || uploader.includes(query);
   });
@@ -25,15 +25,15 @@ const SavedFilesList = ({
   return (
     <div className="saved-files-section">
       <div className="saved-files-header">
-        <h2>Saved Files</h2>
+        <h2>ویدیوهای ذخیره شده</h2>
         <div className="header-actions">
           <select
             value={selectedPlaylistFilter || ''}
             onChange={(e) => onFilterChange(e.target.value || null)}
             className="playlist-filter-select"
           >
-            <option value="">All Playlists</option>
-            <option value="none">No Playlist</option>
+            <option value="">همه پلی‌لیست‌ها</option>
+            <option value="none">بدون پلی‌لیست</option>
             {playlists.map(playlist => (
               <option key={playlist.id} value={playlist.id} dir={isPersianText(playlist.title) ? 'rtl' : 'ltr'}>
                 {playlist.title}
@@ -42,7 +42,7 @@ const SavedFilesList = ({
           </select>
           <input
             type="text"
-            placeholder="🔍 Search videos..."
+            placeholder="🔍 جستجوی ویدیو..."
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             className="search-input"
@@ -51,7 +51,7 @@ const SavedFilesList = ({
             onClick={onNewDownload}
             className="new-download-btn"
           >
-            ➕ Download New
+            ➕ دانلود جدید
           </button>
         </div>
       </div>

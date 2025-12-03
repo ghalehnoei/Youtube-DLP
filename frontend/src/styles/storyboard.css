@@ -5,6 +5,11 @@
   border-top: 1px solid rgba(0, 0, 0, 0.05);
 }
 
+.dark-mode .storyboard-section {
+  background: #202020;
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+
 .storyboard-section.storyboard-sidebar {
   width: 280px;
   flex-shrink: 0;
@@ -19,6 +24,11 @@
   overflow: hidden;
 }
 
+.dark-mode .storyboard-section.storyboard-sidebar {
+  background: #1a1a1a;
+  border-left-color: rgba(255, 255, 255, 0.1);
+}
+
 .storyboard-title {
   font-size: 0.9375rem;
   font-weight: 600;
@@ -27,6 +37,11 @@
   padding-bottom: 8px;
   border-bottom: 2px solid rgba(102, 126, 234, 0.2);
   flex-shrink: 0;
+}
+
+.dark-mode .storyboard-title {
+  color: #ffffff;
+  border-bottom-color: rgba(102, 126, 234, 0.4);
 }
 
 .storyboard-frames-grid {
@@ -56,13 +71,25 @@
   border-radius: 3px;
 }
 
+.dark-mode .storyboard-frames-slider::-webkit-scrollbar-track {
+  background: #2a2a2a;
+}
+
 .storyboard-frames-slider::-webkit-scrollbar-thumb {
   background: #c1c1c1;
   border-radius: 3px;
 }
 
+.dark-mode .storyboard-frames-slider::-webkit-scrollbar-thumb {
+  background: #555555;
+}
+
 .storyboard-frames-slider::-webkit-scrollbar-thumb:hover {
   background: #a8a8a8;
+}
+
+.dark-mode .storyboard-frames-slider::-webkit-scrollbar-thumb:hover {
+  background: #666666;
 }
 
 .storyboard-frame-item {
@@ -77,9 +104,19 @@
   flex-shrink: 0;
 }
 
+.dark-mode .storyboard-frame-item {
+  background: #2a2a2a;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+
 .storyboard-frame-item:hover {
   transform: translateX(-2px);
   box-shadow: 0 4px 8px rgba(0,0,0,0.12);
+  border-color: #667eea;
+}
+
+.dark-mode .storyboard-frame-item:hover {
+  box-shadow: 0 4px 8px rgba(0,0,0,0.5);
   border-color: #667eea;
 }
 
@@ -91,6 +128,10 @@
   background: #f0f0f0;
 }
 
+.dark-mode .storyboard-frame-image {
+  background: #1a1a1a;
+}
+
 .storyboard-frame-info {
   padding: 6px 8px;
   background: #f8f9fa;
@@ -98,6 +139,10 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
+}
+
+.dark-mode .storyboard-frame-info {
+  background: #1a1a1a;
 }
 
 .storyboard-frame-time {
@@ -138,10 +183,19 @@
   line-height: 1.2;
 }
 
+.dark-mode .storyboard-keyword-more {
+  background: rgba(255, 255, 255, 0.1);
+  color: #aaaaaa;
+}
+
 .storyboard-loading {
   padding: 20px;
   text-align: center;
   color: #606060;
   font-size: 0.875rem;
+}
+
+.dark-mode .storyboard-loading {
+  color: #aaaaaa;
 }
 

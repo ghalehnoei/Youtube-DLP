@@ -25,7 +25,7 @@ const PlaylistModal = ({
     <div className="modal-overlay" onClick={onClose}>
       <div className="playlist-modal" onClick={(e) => e.stopPropagation()}>
         <div className="playlist-modal-header">
-          <h2>Save to Playlist</h2>
+          <h2>ذخیره در پلی‌لیست</h2>
           <button 
             className="modal-close-btn"
             onClick={onClose}
@@ -40,14 +40,14 @@ const PlaylistModal = ({
           <div className="playlist-modal-content">
             <div className="playlist-select-section">
               <label className="playlist-label">
-                Select Playlist <span className="required">*</span>
+                انتخاب پلی‌لیست <span className="required">*</span>
               </label>
               <select
                 value={selectedPlaylistId || ''}
                 onChange={(e) => onSelectPlaylist(e.target.value || null)}
                 className="playlist-select"
               >
-                <option value="">No Playlist</option>
+                <option value="">بدون پلی‌لیست</option>
                 {playlists.map(playlist => (
                   <option key={playlist.id} value={playlist.id} dir={isPersianText(playlist.title) ? 'rtl' : 'ltr'}>
                     {playlist.title}
@@ -60,7 +60,7 @@ const PlaylistModal = ({
               className="create-playlist-btn"
               onClick={onShowCreatePlaylist}
             >
-              ➕ Create New Playlist
+              ➕ ایجاد پلی‌لیست جدید
             </button>
             
             <div className="playlist-modal-actions">
@@ -68,7 +68,7 @@ const PlaylistModal = ({
                 className="playlist-cancel-btn"
                 onClick={onClose}
               >
-                Cancel
+                لغو
               </button>
               <button
                 className="playlist-save-btn"
@@ -77,7 +77,7 @@ const PlaylistModal = ({
                 <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
                   <path d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"/>
                 </svg>
-                Save
+                ذخیره
               </button>
             </div>
           </div>
@@ -85,18 +85,18 @@ const PlaylistModal = ({
           <div className="playlist-modal-content">
             <div className="create-playlist-section">
               <label className="playlist-label">
-                Playlist Title <span className="required">*</span>
+                عنوان پلی‌لیست <span className="required">*</span>
               </label>
               <input
                 type="text"
                 value={newPlaylistTitle}
                 onChange={(e) => onTitleChange(e.target.value)}
-                placeholder="Enter a title for your playlist"
+                placeholder="عنوان پلی‌لیست را وارد کنید"
                 className="playlist-input"
                 maxLength={100}
               />
               
-              <label className="playlist-label">Description</label>
+              <label className="playlist-label">توضیحات</label>
               <textarea
                 value={newPlaylistDescription}
                 onChange={(e) => {
@@ -105,26 +105,26 @@ const PlaylistModal = ({
                     onDescriptionChange(value);
                   }
                 }}
-                placeholder="Add playlist description"
+                placeholder="توضیحات پلی‌لیست را اضافه کنید"
                 className="playlist-textarea"
                 rows={3}
                 maxLength={50}
               />
               <div className="char-counter">
-                {newPlaylistDescription.length} of 50
+                {newPlaylistDescription.length} از 50
               </div>
               
               <label className="playlist-label">
-                Publish Status <span className="required">*</span>
+                وضعیت انتشار <span className="required">*</span>
               </label>
               <select
                 value={newPlaylistStatus}
                 onChange={(e) => onStatusChange(e.target.value)}
                 className="playlist-select"
               >
-                <option value="private">Private</option>
-                <option value="public">Public</option>
-                <option value="unlisted">Unlisted</option>
+                <option value="private">خصوصی</option>
+                <option value="public">عمومی</option>
+                <option value="unlisted">فهرست نشده</option>
               </select>
             </div>
             
@@ -143,7 +143,7 @@ const PlaylistModal = ({
                 <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
                   <path d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"/>
                 </svg>
-                Create
+                ایجاد
               </button>
             </div>
           </div>
