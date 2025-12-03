@@ -378,6 +378,200 @@ class S3Uploader:
             print(f"Error generating presigned URL from key: {e}")
             return None
     
+    async def upload_storyboard_html(
+        self,
+        html_path: str,
+        job_id: str,
+        progress_callback: Optional[Callable] = None
+    ) -> Optional[str]:
+        """
+        Upload storyboard HTML file to S3.
+        
+        Args:
+            html_path: Local HTML file path
+            job_id: Job ID for organizing files in S3
+            progress_callback: Callback function(percent, message)
+        
+        Returns:
+            S3 URL or None if failed
+        """
+        if not self.s3_client or not settings.s3_bucket:
+            return None
+        
+        file_path_obj = Path(html_path)
+        if not file_path_obj.exists():
+            return None
+        
+        # Generate S3 key for storyboard HTML
+        s3_key = f"storyboards/{job_id}/storyboard.html"
+        
+        try:
+            loop = asyncio.get_event_loop()
+            s3_key = await loop.run_in_executor(
+                None,
+                self._upload_file_sync,
+                str(html_path),
+                s3_key,
+                'text/html',
+                progress_callback
+            )
+            
+            if not s3_key:
+                return None
+            
+            # Generate URL
+            if settings.s3_public_urls:
+                if settings.s3_endpoint_url:
+                    s3_url = f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/{s3_key}"
+                else:
+                    s3_url = f"https://{settings.s3_bucket}.s3.{settings.s3_region}.amazonaws.com/{s3_key}"
+            else:
+                s3_url = self._generate_presigned_url_storyboard(s3_key, 'text/html')
+            
+            return s3_url
+        except Exception as e:
+            print(f"Error uploading storyboard HTML: {e}")
+            return None
+    
+    async def upload_storyboard_frame(
+        self,
+        frame_path: str,
+        job_id: str,
+        frame_index: int,
+        progress_callback: Optional[Callable] = None
+    ) -> Optional[str]:
+        """
+        Upload a storyboard frame image to S3.
+        
+        Args:
+            frame_path: Local frame image file path
+            job_id: Job ID for organizing files in S3
+            frame_index: Index of the frame
+            progress_callback: Callback function(percent, message)
+        
+        Returns:
+            S3 URL or None if failed
+        """
+        if not self.s3_client or not settings.s3_bucket:
+            return None
+        
+        file_path_obj = Path(frame_path)
+        if not file_path_obj.exists():
+            return None
+        
+        # Generate S3 key for frame
+        s3_key = f"storyboards/{job_id}/frames/frame_{frame_index:04d}.jpg"
+        
+        try:
+            loop = asyncio.get_event_loop()
+            s3_key = await loop.run_in_executor(
+                None,
+                self._upload_file_sync,
+                str(frame_path),
+                s3_key,
+                'image/jpeg',
+                progress_callback
+            )
+            
+            if not s3_key:
+                return None
+            
+            # Generate URL
+            if settings.s3_public_urls:
+                if settings.s3_endpoint_url:
+                    s3_url = f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/{s3_key}"
+                else:
+                    s3_url = f"https://{settings.s3_bucket}.s3.{settings.s3_region}.amazonaws.com/{s3_key}"
+            else:
+                s3_url = self._generate_presigned_url_storyboard(s3_key, 'image/jpeg')
+            
+            return s3_url
+        except Exception as e:
+            print(f"Error uploading storyboard frame: {e}")
+            return None
+    
+    def _upload_file_sync(
+        self,
+        file_path: str,
+        s3_key: str,
+        content_type: str,
+        progress_callback: Optional[Callable] = None
+    ) -> Optional[str]:
+        """Synchronous file upload helper."""
+        try:
+            extra_args = {
+                'ContentType': content_type,
+                'Metadata': {
+                    'original-filename': Path(file_path).name
+                }
+            }
+            
+            self.s3_client.upload_file(
+                file_path,
+                settings.s3_bucket,
+                s3_key,
+                ExtraArgs=extra_args
+            )
+            
+            if progress_callback:
+                progress_callback(100.0, "Upload complete")
+            
+            return s3_key
+        except Exception as e:
+            print(f"Error uploading file: {e}")
+            return None
+    
+    def _generate_presigned_url_storyboard(self, s3_key: str, content_type: str) -> str:
+        """Generate a presigned URL for storyboard files."""
+        try:
+            url = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': settings.s3_bucket,
+                    'Key': s3_key,
+                    'ResponseContentType': content_type,
+                },
+                ExpiresIn=settings.s3_url_expiration
+            )
+            return url
+        except Exception as e:
+            print(f"Error generating presigned URL for storyboard: {e}")
+            if settings.s3_endpoint_url:
+                return f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/{s3_key}"
+            else:
+                return f"https://{settings.s3_bucket}.s3.{settings.s3_region}.amazonaws.com/{s3_key}"
+    
+    def generate_presigned_url_for_frame(self, s3_key: str) -> Optional[str]:
+        """
+        Generate a fresh presigned URL for a storyboard frame from its S3 key.
+        This should be called on-demand since presigned URLs expire.
+        
+        Args:
+            s3_key: S3 key of the frame (e.g., "storyboards/job_id/frames/frame_0001.jpg")
+        
+        Returns:
+            Presigned URL or None if failed
+        """
+        if not self.s3_client or not settings.s3_bucket:
+            return None
+        
+        if not s3_key:
+            return None
+        
+        try:
+            if settings.s3_public_urls:
+                # Public URLs don't expire
+                if settings.s3_endpoint_url:
+                    return f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/{s3_key}"
+                else:
+                    return f"https://{settings.s3_bucket}.s3.{settings.s3_region}.amazonaws.com/{s3_key}"
+            else:
+                # Generate fresh presigned URL
+                return self._generate_presigned_url_storyboard(s3_key, 'image/jpeg')
+        except Exception as e:
+            print(f"Error generating presigned URL for frame {s3_key}: {e}")
+            return None
+    
     def extract_s3_key_from_url(self, s3_url: str) -> Optional[str]:
         """Extract S3 key from a presigned URL or public URL."""
         try:

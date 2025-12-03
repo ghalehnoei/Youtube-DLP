@@ -24,6 +24,7 @@ from app.metadata_store import MetadataStore
 from app.thumbnail_generator import ThumbnailGenerator
 from app.video_converter import VideoConverter
 from app.playlist_store import PlaylistStore
+from app.storyboard_generator import StoryboardGenerator
 from fastapi import UploadFile, File
 
 # Global job manager
@@ -90,6 +91,13 @@ class UploadResponse(BaseModel):
     job_id: str
     status: str
     message: str
+
+
+class StoryboardRequest(BaseModel):
+    video_url: str  # Can be S3 URL, local file path, or HTTP URL
+    threshold: Optional[float] = 0.3  # Scene change detection threshold (0.0-1.0)
+    thumbnail_width: Optional[int] = 320
+    thumbnail_height: Optional[int] = 180
 
 
 @app.get("/")
@@ -202,6 +210,625 @@ async def start_upload(file: UploadFile = File(...)):
             status_code=500,
             detail=f"Failed to save uploaded file: {str(e)}"
         )
+
+
+@app.post("/api/storyboard", response_model=JobResponse)
+async def start_storyboard(request: StoryboardRequest):
+    """
+    Start a storyboard generation job.
+    Detects scene changes in a video and extracts frames to create a storyboard.
+    Returns a job_id that can be used to track progress via WebSocket.
+    """
+    job_id = str(uuid.uuid4())
+    
+    # Create job
+    job_manager.create_job(job_id, f"storyboard:{request.video_url}")
+    
+    # Start storyboard generation in background
+    task = asyncio.create_task(process_storyboard(
+        job_id,
+        request.video_url,
+        request.threshold,
+        request.thumbnail_width,
+        request.thumbnail_height
+    ))
+    job_manager.set_job_task(job_id, task)
+    
+    return JobResponse(
+        job_id=job_id,
+        status="started",
+        message="Storyboard generation started. Connect to WebSocket to track progress."
+    )
+
+
+async def process_storyboard(
+    job_id: str,
+    video_url: str,
+    threshold: float = 0.3,
+    thumbnail_width: int = 320,
+    thumbnail_height: int = 180
+):
+    """
+    Process storyboard generation: detect scene changes and extract frames.
+    """
+    generator = StoryboardGenerator()
+    
+    try:
+        # Check if cancelled before starting
+        if job_manager.is_cancelled(job_id):
+            return
+        
+        # Notify start
+        job_manager.update_job_status(job_id, "storyboard", 0, "Starting storyboard generation...")
+        
+        # Create output directory
+        output_dir = Path(settings.temp_dir) / "storyboards" / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate storyboard
+        result = await generator.generate_storyboard(
+            video_path=video_url,
+            output_dir=str(output_dir),
+            threshold=threshold,
+            thumbnail_width=thumbnail_width,
+            thumbnail_height=thumbnail_height,
+            progress_callback=lambda p, s: job_manager.update_job_status(
+                job_id, "storyboard", p, s
+            ),
+            job_id=job_id
+        )
+        
+        if result:
+            uploader = S3Uploader()
+            
+            # Extract keywords for each frame
+            try:
+                from app.keyword_extractor import KeywordExtractor
+                # Use None to get backend from settings
+                keyword_extractor = KeywordExtractor(backend=None)
+                
+                job_manager.update_job_status(job_id, "storyboard", 80, "Extracting keywords from frames...")
+                
+                # Extract keywords for all frames
+                image_paths = [frame['image_path'] for frame in result['frames']]
+                keyword_results = await keyword_extractor.extract_keywords_batch(
+                    image_paths,
+                    max_keywords=None,  # Use default from settings
+                    progress_callback=lambda p, s: job_manager.update_job_status(
+                        job_id, "storyboard", 80 + int(p * 0.05), s
+                    )
+                )
+                
+                # Add keywords to frames
+                for frame, keyword_result in zip(result['frames'], keyword_results):
+                    frame['keywords'] = keyword_result['keywords']
+                
+                print(f"✅ Extracted keywords for {len(keyword_results)} frames")
+            except Exception as e:
+                print(f"Warning: Could not extract keywords: {e}")
+                import traceback
+                traceback.print_exc()
+                # Continue without keywords
+                for frame in result['frames']:
+                    frame['keywords'] = []
+            
+            # Upload frame images to S3 first (so we can update HTML with S3 URLs)
+            uploaded_frames = []
+            frame_count = len(result['frames'])
+            for idx, frame in enumerate(result['frames']):
+                try:
+                    frame_s3_url = await uploader.upload_storyboard_frame(
+                        frame['image_path'],
+                        job_id,
+                        frame['index'],
+                        lambda p, s: job_manager.update_job_status(
+                            job_id, "storyboard", 85 + ((idx / frame_count) * 0.05), 
+                            f"Uploading frame {idx + 1}/{frame_count}..."
+                        )
+                    )
+                    if frame_s3_url:
+                        frame_s3_key = uploader.extract_s3_key_from_url(frame_s3_url)
+                        uploaded_frames.append({
+                            'index': frame['index'],
+                            'timestamp': frame['timestamp'],
+                            'time_str': frame['time_str'],
+                            'image_path': frame['image_path'],  # Keep local path as fallback
+                            'image_s3_key': frame_s3_key,  # Store only S3 key, not URL (URLs expire)
+                            'keywords': frame.get('keywords', [])  # Include keywords
+                        })
+                    else:
+                        # Keep original frame if upload failed
+                        uploaded_frames.append({
+                            'index': frame['index'],
+                            'timestamp': frame['timestamp'],
+                            'time_str': frame['time_str'],
+                            'image_path': frame['image_path'],
+                            'keywords': frame.get('keywords', [])  # Include keywords even if upload failed
+                        })
+                except Exception as e:
+                    print(f"Warning: Could not upload frame {frame['index']}: {e}")
+                    # Keep original frame if upload failed
+                    uploaded_frames.append(frame)
+            
+            # Note: We don't update HTML with S3 URLs anymore since presigned URLs expire
+            # The HTML will use API endpoints which generate fresh presigned URLs on-demand
+            html_path_to_upload = result['html_path']
+            
+            # Upload storyboard HTML to S3
+            html_s3_url = None
+            html_s3_key = None
+            try:
+                job_manager.update_job_status(job_id, "storyboard", 90, "Uploading storyboard HTML to S3...")
+                html_s3_url = await uploader.upload_storyboard_html(
+                    html_path_to_upload,
+                    job_id,
+                    lambda p, s: job_manager.update_job_status(job_id, "storyboard", 90 + (p * 0.05), s)
+                )
+                if html_s3_url:
+                    html_s3_key = uploader.extract_s3_key_from_url(html_s3_url)
+            except Exception as e:
+                print(f"Warning: Could not upload storyboard HTML: {e}")
+            
+            
+            # Store storyboard result in job metadata (including S3 URLs)
+            metadata = {
+                'html_path': result['html_path'],  # Keep local path as fallback
+                'html_s3_url': html_s3_url,
+                'html_s3_key': html_s3_key,
+                'frames_dir': result['frames_dir'],
+                'frame_count': result['frame_count'],
+                'frames': uploaded_frames,  # Store frames with S3 URLs
+                'video_url': video_url
+            }
+            job_manager.set_job_metadata(job_id, metadata)
+            
+            # Complete job with HTML path (use S3 URL if available, otherwise local path)
+            complete_url = html_s3_url if html_s3_url else result['html_path']
+            job_manager.complete_job(job_id, complete_url, metadata)
+            
+            # Also store frames in parent job metadata if this is a storyboard job
+            # Find parent job by checking if any job has this storyboard_job_id
+            try:
+                files = metadata_store.get_all()
+                updated_count = 0
+                for file in files:
+                    file_metadata = file.get('metadata', {})
+                    if file_metadata.get('storyboard_job_id') == job_id:
+                        # Found parent file, update its metadata with storyboard frames
+                        # Get the current metadata and merge with new storyboard data
+                        current_metadata = file.get('metadata', {})
+                        current_metadata = current_metadata.copy() if current_metadata else {}
+                        current_metadata['frames'] = uploaded_frames
+                        current_metadata['storyboard_html_s3_url'] = html_s3_url
+                        current_metadata['storyboard_html_s3_key'] = html_s3_key
+                        current_metadata['storyboard_completed'] = True
+                        current_metadata['storyboard_frame_count'] = len(uploaded_frames)
+                        if metadata_store.update(file.get('id'), {'metadata': current_metadata}):
+                            updated_count += 1
+                            print(f"✅ Updated parent file {file.get('id')} with storyboard frames ({len(uploaded_frames)} frames)")
+                            # Verify the update worked
+                            updated_file = metadata_store.get_by_id(file.get('id'))
+                            if updated_file:
+                                updated_metadata = updated_file.get('metadata', {})
+                                if 'frames' in updated_metadata:
+                                    print(f"✅ Verified: Parent file now has {len(updated_metadata.get('frames', []))} frames in metadata")
+                                else:
+                                    print(f"❌ Warning: Parent file update may have failed - frames not found after update")
+                        else:
+                            print(f"❌ Failed to update parent file {file.get('id')}")
+                
+                if updated_count == 0:
+                    print(f"⚠️ Warning: No parent file found with storyboard_job_id={job_id}")
+                    print(f"   Searched {len(files)} files")
+                    # Debug: print all storyboard_job_ids found
+                    found_job_ids = [f.get('metadata', {}).get('storyboard_job_id') for f in files if f.get('metadata', {}).get('storyboard_job_id')]
+                    print(f"   Found storyboard_job_ids: {found_job_ids[:5]}...")  # Show first 5
+                
+                # Also check if there's a parent job in job manager
+                # Find all jobs and check if any have this storyboard_job_id
+                with job_manager._lock:
+                    all_jobs = list(job_manager.jobs.values())
+                for job in all_jobs:
+                    job_metadata = job.metadata if hasattr(job, 'metadata') else {}
+                    if job_metadata.get('storyboard_job_id') == job_id:
+                        # Update parent job metadata with frames
+                        job_metadata = job_metadata.copy()
+                        job_metadata['frames'] = uploaded_frames
+                        job_metadata['storyboard_html_s3_url'] = html_s3_url
+                        job_metadata['storyboard_html_s3_key'] = html_s3_key
+                        job_manager.set_job_metadata(job.job_id, job_metadata)
+                        print(f"Updated parent job {job.job_id} with storyboard frames ({len(uploaded_frames)} frames)")
+                        break
+            except Exception as e:
+                print(f"Warning: Could not update parent job/file with storyboard frames: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Clean up local files after successful upload
+            if html_s3_url and html_s3_key:
+                try:
+                    # Clean up HTML file
+                    if os.path.exists(result['html_path']):
+                        os.remove(result['html_path'])
+                    # Clean up frame images that were successfully uploaded
+                    uploaded_frame_indices = {f.get('index') for f in uploaded_frames if f.get('image_s3_url')}
+                    for frame in result['frames']:
+                        if frame['index'] in uploaded_frame_indices:
+                            if os.path.exists(frame['image_path']):
+                                try:
+                                    os.remove(frame['image_path'])
+                                except:
+                                    pass
+                    # Try to remove empty directories
+                    try:
+                        if os.path.exists(result['frames_dir']) and not os.listdir(result['frames_dir']):
+                            os.rmdir(result['frames_dir'])
+                        if os.path.exists(str(Path(result['html_path']).parent)) and not os.listdir(str(Path(result['html_path']).parent)):
+                            os.rmdir(str(Path(result['html_path']).parent))
+                    except:
+                        pass
+                except Exception as e:
+                    print(f"Warning: Could not clean up local storyboard files: {e}")
+        else:
+            job_manager.update_job_status(
+                job_id, "error", 0, "Storyboard generation failed"
+            )
+    
+    except Exception as e:
+        error_str = str(e) if e else "Unknown error"
+        job_manager.update_job_status(
+            job_id, "error", 0, f"Storyboard generation error: {error_str}"
+        )
+        import traceback
+        traceback.print_exc()
+
+
+@app.get("/api/storyboard/{job_id}/status")
+async def get_storyboard_status(job_id: str):
+    """Get storyboard job status and frame count."""
+    status = job_manager.get_job_status(job_id)
+    
+    # If job not found in job manager, check saved files
+    if not status:
+        files = metadata_store.get_all()
+        for file in files:
+            file_metadata = file.get('metadata', {})
+            if file_metadata.get('storyboard_job_id') == job_id:
+                frames_count = len(file_metadata.get('frames', []))
+                return {
+                    "job_id": job_id,
+                    "status": "complete" if frames_count > 0 else "pending",
+                    "frame_count": frames_count,
+                    "has_frames": frames_count > 0,
+                    "parent_file_id": file.get('id'),
+                    "parent_job_id": file.get('job_id')
+                }
+            if file.get('job_id') == job_id:
+                frames_count = len(file_metadata.get('frames', []))
+                return {
+                    "job_id": job_id,
+                    "status": "complete" if frames_count > 0 else "pending",
+                    "frame_count": frames_count,
+                    "has_frames": frames_count > 0
+                }
+        return {
+            "job_id": job_id,
+            "status": "not_found",
+            "frame_count": 0,
+            "has_frames": False
+        }
+    
+    metadata = status.get('metadata', {})
+    frames_count = len(metadata.get('frames', []))
+    return {
+        "job_id": job_id,
+        "status": status.get('stage', 'unknown'),
+        "frame_count": frames_count,
+        "has_frames": frames_count > 0,
+        "percent": status.get('percent', 0)
+    }
+
+
+@app.get("/api/storyboard/{job_id}/html")
+async def get_storyboard_html(job_id: str):
+    """Serve the generated storyboard HTML file."""
+    status = job_manager.get_job_status(job_id)
+    
+    # If job not found in job manager, try to find it in saved files metadata
+    if not status:
+        files = metadata_store.get_all()
+        for file in files:
+            file_metadata = file.get('metadata', {})
+            if file_metadata.get('storyboard_job_id') == job_id:
+                # Check if HTML S3 URL is in metadata
+                html_s3_url = file_metadata.get('storyboard_html_s3_url')
+                if html_s3_url:
+                    return RedirectResponse(url=html_s3_url)
+                break
+    
+    if not status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    metadata = status.get('metadata', {})
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Storyboard not found or not generated yet")
+    
+    # Prefer S3 URL if available, otherwise use local path
+    html_s3_url = metadata.get('html_s3_url')
+    if html_s3_url:
+        # Redirect to S3 URL
+        return RedirectResponse(url=html_s3_url)
+    
+    html_path = metadata.get('html_path')
+    if not html_path or not os.path.exists(html_path):
+        raise HTTPException(status_code=404, detail="Storyboard HTML file not found")
+    
+    # Read and return HTML file
+    try:
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(content=html_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read storyboard HTML: {str(e)}")
+
+
+@app.get("/api/storyboard/{job_id}/frames")
+async def get_storyboard_frames(job_id: str):
+    """Get all storyboard frames for a video job."""
+    status = job_manager.get_job_status(job_id)
+    
+    # If job not found in job manager, try to find it in saved files metadata
+    if not status:
+        # Try to find the job in saved files by checking if this is a storyboard job ID
+        # or if we can find a parent job that references this storyboard job
+        files = metadata_store.get_all()
+        for file in files:
+            file_metadata = file.get('metadata', {})
+            # Check if this file has a storyboard_job_id matching the requested job_id
+            if file_metadata.get('storyboard_job_id') == job_id:
+                # Found parent job, check if frames are in parent metadata
+                if 'frames' in file_metadata and file_metadata['frames']:
+                    frames = file_metadata['frames']
+                    uploader = S3Uploader()
+                    # Filter out invalid frames and generate fresh presigned URLs
+                    valid_frames = []
+                    for idx, frame in enumerate(frames):
+                        if not isinstance(frame, dict):
+                            continue
+                        frame_index = frame.get('index', idx)
+                        # Generate fresh presigned URL from S3 key if available
+                        image_url = f"/api/storyboard/{job_id}/frame/{frame_index}"
+                        s3_key = frame.get('image_s3_key')
+                        if s3_key:
+                            fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+                            if fresh_url:
+                                image_url = fresh_url
+                        valid_frames.append({
+                            "index": frame_index,
+                            "timestamp": frame.get('timestamp', 0),
+                            "time_str": frame.get('time_str', '00:00'),
+                            "image_url": image_url,
+                            "keywords": frame.get('keywords', [])
+                        })
+                    if valid_frames:
+                        return {"frames": valid_frames}
+                # If frames not found but storyboard_job_id exists, storyboard might still be generating
+                # Return empty array instead of 404
+                return {"frames": []}
+            # Check if this file's job_id matches and has frames
+            if file.get('job_id') == job_id and 'frames' in file_metadata and file_metadata['frames']:
+                frames = file_metadata['frames']
+                uploader = S3Uploader()
+                valid_frames = []
+                for idx, frame in enumerate(frames):
+                    if not isinstance(frame, dict):
+                        continue
+                    frame_index = frame.get('index', idx)
+                    # Generate fresh presigned URL from S3 key if available
+                    image_url = f"/api/storyboard/{job_id}/frame/{frame_index}"
+                    s3_key = frame.get('image_s3_key')
+                    if s3_key:
+                        fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+                        if fresh_url:
+                            image_url = fresh_url
+                    valid_frames.append({
+                        "index": frame_index,
+                        "timestamp": frame.get('timestamp', 0),
+                        "time_str": frame.get('time_str', '00:00'),
+                        "image_url": image_url,
+                        "keywords": frame.get('keywords', [])
+                    })
+                if valid_frames:
+                    return {"frames": valid_frames}
+        
+        # If we found a file with this storyboard_job_id but no frames, return empty array
+        # (storyboard might still be generating)
+        files = metadata_store.get_all()
+        for file in files:
+            file_metadata = file.get('metadata', {})
+            if file_metadata.get('storyboard_job_id') == job_id or file.get('job_id') == job_id:
+                return {"frames": []}
+        
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    metadata = status.get('metadata', {})
+    if not metadata or 'frames' not in metadata:
+        # Try to get storyboard_job_id from metadata
+        storyboard_job_id = metadata.get('storyboard_job_id') if metadata else None
+        if storyboard_job_id:
+            # Get frames from storyboard job
+            storyboard_status = job_manager.get_job_status(storyboard_job_id)
+            if storyboard_status:
+                storyboard_metadata = storyboard_status.get('metadata', {})
+                if storyboard_metadata and 'frames' in storyboard_metadata:
+                    frames = storyboard_metadata['frames']
+                    uploader = S3Uploader()
+                    # Generate fresh presigned URLs for frames
+                    valid_frames = []
+                    for idx, frame in enumerate(frames):
+                        if not isinstance(frame, dict):
+                            continue
+                        frame_index = frame.get('index', idx)
+                        # Generate fresh presigned URL from S3 key if available
+                        image_url = f"/api/storyboard/{storyboard_job_id}/frame/{frame_index}"
+                        s3_key = frame.get('image_s3_key')
+                        if s3_key:
+                            fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+                            if fresh_url:
+                                image_url = fresh_url
+                        valid_frames.append({
+                            "index": frame_index,
+                            "timestamp": frame.get('timestamp', 0),
+                            "time_str": frame.get('time_str', '00:00'),
+                            "image_url": image_url,
+                            "keywords": frame.get('keywords', [])
+                        })
+                    return {"frames": valid_frames}
+            else:
+                # Storyboard job not in memory, try to find in saved files
+                files = metadata_store.get_all()
+                for file in files:
+                    file_metadata = file.get('metadata', {})
+                    if file_metadata.get('storyboard_job_id') == storyboard_job_id:
+                        if 'frames' in file_metadata and file_metadata['frames']:
+                            frames = file_metadata['frames']
+                            uploader = S3Uploader()
+                            valid_frames = []
+                            for idx, frame in enumerate(frames):
+                                if not isinstance(frame, dict):
+                                    continue
+                                frame_index = frame.get('index', idx)
+                                # Generate fresh presigned URL from S3 key if available
+                                image_url = f"/api/storyboard/{storyboard_job_id}/frame/{frame_index}"
+                                s3_key = frame.get('image_s3_key')
+                                if s3_key:
+                                    fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+                                    if fresh_url:
+                                        image_url = fresh_url
+                                valid_frames.append({
+                                    "index": frame_index,
+                                    "timestamp": frame.get('timestamp', 0),
+                                    "time_str": frame.get('time_str', '00:00'),
+                                    "image_url": image_url,
+                                    "keywords": frame.get('keywords', [])
+                                })
+                            if valid_frames:
+                                return {"frames": valid_frames}
+                        # If storyboard_job_id exists but no frames, storyboard might still be generating
+                        return {"frames": []}
+        # If we have a storyboard_job_id but no frames found, return empty array (might still be generating)
+        if storyboard_job_id:
+            return {"frames": []}
+        raise HTTPException(status_code=404, detail="Storyboard frames not found")
+    
+    frames = metadata['frames']
+    uploader = S3Uploader()
+    # Generate fresh presigned URLs for frames
+    valid_frames = []
+    for idx, frame in enumerate(frames):
+        if not isinstance(frame, dict):
+            continue
+        frame_index = frame.get('index', idx)
+        # Generate fresh presigned URL from S3 key if available
+        image_url = f"/api/storyboard/{job_id}/frame/{frame_index}"
+        s3_key = frame.get('image_s3_key')
+        if s3_key:
+            fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+            if fresh_url:
+                image_url = fresh_url
+        valid_frames.append({
+            "index": frame_index,
+            "timestamp": frame.get('timestamp', 0),
+            "time_str": frame.get('time_str', '00:00'),
+            "image_url": image_url,
+            "keywords": frame.get('keywords', [])
+        })
+    return {"frames": valid_frames}
+
+
+@app.get("/api/storyboard/{job_id}/frame/{frame_index}")
+async def get_storyboard_frame(job_id: str, frame_index: int):
+    """Serve a storyboard frame image."""
+    status = job_manager.get_job_status(job_id)
+    frames = None
+    metadata = {}
+    
+    # If job not found in job manager, try to find it in saved files metadata
+    if not status:
+        files = metadata_store.get_all()
+        for file in files:
+            file_metadata = file.get('metadata', {})
+            # Check if this file has a storyboard_job_id matching the requested job_id
+            if file_metadata.get('storyboard_job_id') == job_id:
+                if 'frames' in file_metadata:
+                    frames = file_metadata['frames']
+                    metadata = file_metadata
+                    break
+            # Check if this file's job_id matches and has frames
+            if file.get('job_id') == job_id and 'frames' in file_metadata:
+                frames = file_metadata['frames']
+                metadata = file_metadata
+                break
+        
+        if not frames:
+            raise HTTPException(status_code=404, detail="Job not found")
+    else:
+        metadata = status.get('metadata', {})
+        if 'frames' in metadata:
+            frames = metadata['frames']
+        else:
+            # Try to get storyboard_job_id from metadata
+            storyboard_job_id = metadata.get('storyboard_job_id')
+            if storyboard_job_id:
+                # Try to get from storyboard job
+                storyboard_status = job_manager.get_job_status(storyboard_job_id)
+                if storyboard_status:
+                    storyboard_metadata = storyboard_status.get('metadata', {})
+                    if 'frames' in storyboard_metadata:
+                        frames = storyboard_metadata['frames']
+                else:
+                    # Try saved files
+                    files = metadata_store.get_all()
+                    for file in files:
+                        file_metadata = file.get('metadata', {})
+                        if file_metadata.get('storyboard_job_id') == storyboard_job_id:
+                            if 'frames' in file_metadata:
+                                frames = file_metadata['frames']
+                                break
+    
+    if not frames:
+        raise HTTPException(status_code=404, detail="Storyboard frames not found")
+    
+    if frame_index < 0 or frame_index >= len(frames):
+        raise HTTPException(status_code=404, detail="Frame index out of range")
+    
+    frame = frames[frame_index]
+    
+    # Generate fresh presigned URL from S3 key if available
+    uploader = S3Uploader()
+    s3_key = frame.get('image_s3_key')
+    if s3_key:
+        fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+        if fresh_url:
+            # Redirect to fresh presigned URL
+            return RedirectResponse(url=fresh_url)
+    
+    # Fallback to local path if available
+    frame_path = frame.get('image_path')
+    if frame_path and os.path.exists(frame_path):
+        # Return image file
+        from fastapi.responses import FileResponse
+        return FileResponse(
+            frame_path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "Access-Control-Allow-Origin": "*",
+            }
+        )
+    
+    raise HTTPException(status_code=404, detail="Frame image not found")
 
 
 async def process_video(
@@ -384,6 +1011,30 @@ async def process_video(
             
             # Success
             job_manager.complete_job(job_id, s3_url, metadata)
+            
+            # Automatically generate storyboard after successful upload
+            try:
+                storyboard_job_id = str(uuid.uuid4())
+                job_manager.create_job(storyboard_job_id, f"storyboard:{s3_url}")
+                
+                # Start storyboard generation in background
+                storyboard_task = asyncio.create_task(process_storyboard(
+                    storyboard_job_id,
+                    s3_url,
+                    0.3,  # Default threshold
+                    320,  # Default thumbnail width
+                    180   # Default thumbnail height
+                ))
+                job_manager.set_job_task(storyboard_job_id, storyboard_task)
+                
+                # Store storyboard job_id in original job metadata
+                metadata['storyboard_job_id'] = storyboard_job_id
+                job_manager.set_job_metadata(job_id, metadata)
+                
+                print(f"Started automatic storyboard generation for job {job_id} -> storyboard job {storyboard_job_id}")
+            except Exception as e:
+                # Don't fail the main job if storyboard generation fails to start
+                print(f"Warning: Failed to start automatic storyboard generation: {e}")
         else:
             job_manager.update_job_status(
                 job_id, "error", 0, "Upload failed: Could not upload to S3"
@@ -603,11 +1254,24 @@ async def save_file_metadata(request: FileMetadataRequest):
             uploader = S3Uploader()
             s3_key = uploader.extract_s3_key_from_url(request.s3_url)
         
+        # Clean metadata - remove storyboard frames if this is a split video
+        # (frames will be generated fresh for the clip via storyboard_job_id)
+        cleaned_metadata = request.metadata.copy() if request.metadata else {}
+        if cleaned_metadata.get('is_split'):
+            # Remove storyboard frames from split videos - they should only have frames from their own storyboard
+            storyboard_fields_to_remove = [
+                'frames', 'html_path', 'html_s3_url', 'html_s3_key', 
+                'frames_dir', 'frame_count'
+            ]
+            for field in storyboard_fields_to_remove:
+                cleaned_metadata.pop(field, None)
+            # Keep storyboard_job_id so the frontend can fetch frames when they're ready
+        
         metadata_dict = {
             "s3_url": request.s3_url,  # Keep for backward compatibility
             "s3_key": s3_key,  # Store S3 key for generating fresh URLs
             "job_id": request.job_id,
-            "metadata": request.metadata,
+            "metadata": cleaned_metadata,  # Use cleaned metadata
             "video_width": request.video_width,
             "video_height": request.video_height,
             "thumbnail_url": request.thumbnail_url,
@@ -882,7 +1546,17 @@ async def process_split(
         if original_metadata:
             # Preserve original title and add split info
             original_title = original_metadata.get('title', 'Unknown')
+            # Copy metadata but exclude storyboard-related fields (frames will be generated fresh for the clip)
             new_metadata = original_metadata.copy()
+            # Remove storyboard frames and related data - new storyboard will be generated for the clip
+            storyboard_fields_to_remove = [
+                'frames', 'storyboard_job_id', 'storyboard_html_s3_url', 
+                'storyboard_html_s3_key', 'storyboard_completed', 'storyboard_frame_count',
+                'html_path', 'html_s3_url', 'html_s3_key', 'frames_dir', 'frame_count'
+            ]
+            for field in storyboard_fields_to_remove:
+                new_metadata.pop(field, None)
+            
             new_metadata['title'] = f"{original_title} (Split {start_time:.1f}s-{end_time:.1f}s)" if end_time else f"{original_title} (Split from {start_time:.1f}s)"
             new_metadata['is_split'] = True
             new_metadata['original_duration'] = original_metadata.get('duration', 0)
@@ -950,6 +1624,30 @@ async def process_split(
             
             # Success
             job_manager.complete_job(job_id, s3_url_new, new_metadata)
+            
+            # Automatically generate storyboard after successful upload
+            try:
+                storyboard_job_id = str(uuid.uuid4())
+                job_manager.create_job(storyboard_job_id, f"storyboard:{s3_url_new}")
+                
+                # Start storyboard generation in background
+                storyboard_task = asyncio.create_task(process_storyboard(
+                    storyboard_job_id,
+                    s3_url_new,
+                    0.3,  # Default threshold
+                    320,  # Default thumbnail width
+                    180   # Default thumbnail height
+                ))
+                job_manager.set_job_task(storyboard_job_id, storyboard_task)
+                
+                # Store storyboard job_id in original job metadata
+                new_metadata['storyboard_job_id'] = storyboard_job_id
+                job_manager.set_job_metadata(job_id, new_metadata)
+                
+                print(f"Started automatic storyboard generation for split job {job_id} -> storyboard job {storyboard_job_id}")
+            except Exception as e:
+                # Don't fail the main job if storyboard generation fails to start
+                print(f"Warning: Failed to start automatic storyboard generation: {e}")
         else:
             job_manager.update_job_status(
                 job_id, "error", 0, "Upload failed: Could not upload to S3"
@@ -1109,6 +1807,30 @@ async def process_upload(
             
             # Success
             job_manager.complete_job(job_id, s3_url, metadata)
+            
+            # Automatically generate storyboard after successful upload
+            try:
+                storyboard_job_id = str(uuid.uuid4())
+                job_manager.create_job(storyboard_job_id, f"storyboard:{s3_url}")
+                
+                # Start storyboard generation in background
+                storyboard_task = asyncio.create_task(process_storyboard(
+                    storyboard_job_id,
+                    s3_url,
+                    0.3,  # Default threshold
+                    320,  # Default thumbnail width
+                    180   # Default thumbnail height
+                ))
+                job_manager.set_job_task(storyboard_job_id, storyboard_task)
+                
+                # Store storyboard job_id in original job metadata
+                metadata['storyboard_job_id'] = storyboard_job_id
+                job_manager.set_job_metadata(job_id, metadata)
+                
+                print(f"Started automatic storyboard generation for upload job {job_id} -> storyboard job {storyboard_job_id}")
+            except Exception as e:
+                # Don't fail the main job if storyboard generation fails to start
+                print(f"Warning: Failed to start automatic storyboard generation: {e}")
         else:
             job_manager.update_job_status(
                 job_id, "error", 0, "Upload failed: Could not upload to S3"

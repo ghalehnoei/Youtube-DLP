@@ -5,6 +5,30 @@ import './App.css';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
+// Utility function to detect Persian/Arabic text
+const isPersianText = (text) => {
+  if (!text || typeof text !== 'string') return false;
+  // Persian/Arabic Unicode range: \u0600-\u06FF
+  const persianRegex = /[\u0600-\u06FF]/;
+  return persianRegex.test(text);
+};
+
+// Component to render text with RTL support for Persian
+const RTLText = ({ children, className = '', tag: Tag = 'span' }) => {
+  const text = typeof children === 'string' ? children : (children?.toString() || '');
+  const hasPersian = isPersianText(text);
+  
+  return (
+    <Tag 
+      className={className}
+      dir={hasPersian ? 'rtl' : 'ltr'}
+      style={hasPersian ? { direction: 'rtl', textAlign: 'right' } : {}}
+    >
+      {children}
+    </Tag>
+  );
+};
+
 // Component to embed YouTube video
 const YouTubeEmbed = ({ url, onDurationChange }) => {
   const getYouTubeEmbedUrl = (url) => {
@@ -108,6 +132,7 @@ function App() {
   const [newPlaylistStatus, setNewPlaylistStatus] = useState('private');
   const [showCreatePlaylist, setShowCreatePlaylist] = useState(false);
   const [selectedPlaylistFilter, setSelectedPlaylistFilter] = useState(null);
+  const [storyboardFrames, setStoryboardFrames] = useState([]);
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const videoRef = useRef(null);
@@ -298,6 +323,88 @@ function App() {
     loadSavedFiles();
     loadPlaylists();
   }, [loadSavedFiles, loadPlaylists]);
+
+  // Load storyboard frames when video is ready
+  useEffect(() => {
+    const loadStoryboardFrames = async () => {
+      if (!status || status.stage !== 'complete') {
+        setStoryboardFrames([]);
+        return;
+      }
+
+      console.log('Loading storyboard frames...', { jobId, metadata: status.metadata });
+
+      // First, check if frames are directly in metadata (for saved files)
+      if (status.metadata && status.metadata.frames && Array.isArray(status.metadata.frames)) {
+        console.log('Found frames in metadata:', status.metadata.frames.length);
+        // Convert frames to the format expected by the UI
+        const frames = status.metadata.frames.map(frame => ({
+          index: frame.index,
+          timestamp: frame.timestamp,
+          time_str: frame.time_str,
+          image_url: frame.image_s3_url || frame.image_url || `/api/storyboard/${status.metadata.storyboard_job_id || jobId}/frame/${frame.index}`
+        }));
+        if (frames.length > 0) {
+          setStoryboardFrames(frames);
+          return;
+        }
+      }
+
+      // Try to get storyboard frames from job_id if available
+      if (jobId) {
+        try {
+          console.log('Fetching storyboard frames from jobId:', jobId);
+          const response = await axios.get(`${API_BASE_URL}/api/storyboard/${jobId}/frames`);
+          if (response.data && response.data.frames) {
+            console.log('Found frames from jobId:', response.data.frames.length);
+            setStoryboardFrames(response.data.frames);
+            return;
+          }
+        } catch (err) {
+          console.log('Failed to fetch from jobId:', err.response?.status, err.message);
+          // Continue to try storyboard_job_id
+        }
+      }
+
+      // Try storyboard_job_id from metadata
+      if (status.metadata && status.metadata.storyboard_job_id) {
+        try {
+          const storyboardJobId = status.metadata.storyboard_job_id;
+          console.log('Fetching storyboard frames from storyboard_job_id:', storyboardJobId);
+          const response = await axios.get(`${API_BASE_URL}/api/storyboard/${storyboardJobId}/frames`);
+          if (response.data && response.data.frames) {
+            console.log('Found frames from storyboard_job_id:', response.data.frames.length);
+            setStoryboardFrames(response.data.frames);
+            return;
+          }
+        } catch (err2) {
+          // Storyboard not available yet or doesn't exist
+          console.log('Storyboard not found from storyboard_job_id:', err2.response?.status, err2.message);
+        }
+      }
+
+      // If we get here, no storyboard was found
+      console.log('No storyboard frames found');
+      setStoryboardFrames([]);
+    };
+
+    loadStoryboardFrames();
+  }, [jobId, status, s3Url]);
+
+  // Function to seek video to a specific timestamp
+  const seekToTimestamp = useCallback((timestamp) => {
+    let video = videoRef.current;
+    if (!video && videoContainerRef.current) {
+      video = videoContainerRef.current.querySelector('video');
+    }
+    if (video && !isNaN(timestamp)) {
+      video.currentTime = timestamp;
+      // If using dash.js player, also seek through the player
+      if (dashPlayerRef.current && dashPlayerRef.current.seek) {
+        dashPlayerRef.current.seek(timestamp);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     // Cleanup on unmount
@@ -839,12 +946,12 @@ function App() {
                       </div>
                     ) : (
                       <h3 className="video-title" onClick={() => handleOpenPlayer(file.s3_url)}>
-                        {file.metadata?.title || 'Untitled Video'}
+                        <RTLText>{file.metadata?.title || 'Untitled Video'}</RTLText>
                       </h3>
                     )}
                     <div className="video-meta-card">
                       {file.metadata?.uploader && (
-                        <p className="video-channel">{file.metadata.uploader}</p>
+                        <p className="video-channel"><RTLText>{file.metadata.uploader}</RTLText></p>
                       )}
                       <div className="video-stats">
                         {file.metadata?.duration && (
@@ -961,118 +1068,120 @@ function App() {
         {(url.trim() || s3Url) && (
           <div className="player-page-wrapper">
             <div className="player-content">
-              <div className="player-video-section">
-                <div className="video-wrapper" style={{ position: 'relative' }}>
-                  {s3Url ? (
-                    <div 
-                      ref={videoContainerRef}
-                      className="dash-video-container"
-                    />
-                  ) : url.trim() ? (
-                    <YouTubeEmbed 
-                      url={url} 
-                      onDurationChange={(duration) => {
-                        setVideoDuration(duration);
-                        if (!endTime) {
-                          setEndTime(duration);
-                        }
-                      }}
-                    />
-                  ) : null}
-                </div>
-              </div>
-              
-              {s3Url && status && status.stage === 'complete' && videoDuration && (
-                <div className="player-times-section">
-                  <div className="time-selection-hint">
-                    <span className="hint-icon">💡</span>
-                    <span className="hint-text">Focus the player, then press <kbd>I</kbd> or <kbd>O</kbd></span>
-                  </div>
-                  <div className="time-selection-display">
-                    <div className="time-display-item">
-                      <span className="time-label">Start Time</span>
-                      <span className="time-value">{formatTime(startTime)}</span>
-                    </div>
-                    <div className="time-display-item">
-                      <span className="time-label">End Time</span>
-                      <span className="time-value">{formatTime(endTime || videoDuration)}</span>
-                    </div>
-                    <div className="time-display-item">
-                      <span className="time-label">Clip Duration</span>
-                      <span className="time-value">{formatTime((endTime || videoDuration) - startTime)}</span>
-                    </div>
+              <div className="player-main-section">
+                <div className="player-video-section">
+                  <div className="video-wrapper" style={{ position: 'relative' }}>
+                    {s3Url ? (
+                      <div 
+                        ref={videoContainerRef}
+                        className="dash-video-container"
+                      />
+                    ) : url.trim() ? (
+                      <YouTubeEmbed 
+                        url={url} 
+                        onDurationChange={(duration) => {
+                          setVideoDuration(duration);
+                          if (!endTime) {
+                            setEndTime(duration);
+                          }
+                        }}
+                      />
+                    ) : null}
                   </div>
                 </div>
-              )}
-              
-              {s3Url && status && status.stage === 'complete' && (
-                <div className="player-info-section">
-                  <div className="player-info-header">
-                    <h1 className="player-video-title">
-                      {status.metadata?.title || 'Video'}
-                    </h1>
-                    <div className="player-meta-info">
-                      {status.metadata?.uploader && (
-                        <span className="player-channel-name">{status.metadata.uploader}</span>
-                      )}
-                      {status.metadata?.view_count && (
-                        <span className="player-view-count">{status.metadata.view_count.toLocaleString()} views</span>
-                      )}
-                      {videoWidth && videoHeight && (
-                        <span className="player-resolution">{videoWidth} × {videoHeight}</span>
-                      )}
+
+                
+                {s3Url && status && status.stage === 'complete' && videoDuration && (
+                  <div className="player-times-section">
+                    <div className="time-selection-hint">
+                      <span className="hint-icon">💡</span>
+                      <span className="hint-text">Focus the player, then press <kbd>I</kbd> or <kbd>O</kbd></span>
+                    </div>
+                    <div className="time-selection-display">
+                      <div className="time-display-item">
+                        <span className="time-label">Start Time</span>
+                        <span className="time-value">{formatTime(startTime)}</span>
+                      </div>
+                      <div className="time-display-item">
+                        <span className="time-label">End Time</span>
+                        <span className="time-value">{formatTime(endTime || videoDuration)}</span>
+                      </div>
+                      <div className="time-display-item">
+                        <span className="time-label">Clip Duration</span>
+                        <span className="time-value">{formatTime((endTime || videoDuration) - startTime)}</span>
+                      </div>
                     </div>
                   </div>
-                  
-                  <div className="player-actions-section">
-                    <div className="player-action-buttons">
-                      <button
-                        onClick={handleSplit}
-                        className="player-action-btn clip-btn"
-                        disabled={!s3Url || !videoDuration}
-                        title="Split video (Press I for start, O for end)"
-                      >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
-                          <path d="M6 9H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2"/>
-                          <path d="M6 15H4a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2h-2"/>
-                          <line x1="6" y1="12" x2="18" y2="12"/>
-                        </svg>
-                        <span>Clip</span>
-                      </button>
-                      
-                      <a
-                        href={s3Url}
-                        download
-                        className="player-action-btn download-btn"
-                        title="Download video"
-                      >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                          <polyline points="7 10 12 15 17 10"/>
-                          <line x1="12" y1="15" x2="12" y2="3"/>
-                        </svg>
-                        <span>Download</span>
-                      </a>
-                      
-                      {!savedFiles.some(file => file.s3_url === s3Url || file.job_id === jobId) && (
+                )}
+                
+                {s3Url && status && status.stage === 'complete' && (
+                  <div className="player-info-section">
+                    <div className="player-info-header">
+                      <h1 className="player-video-title">
+                        <RTLText>{status.metadata?.title || 'Video'}</RTLText>
+                      </h1>
+                      <div className="player-meta-info">
+                        {status.metadata?.uploader && (
+                          <span className="player-channel-name"><RTLText>{status.metadata.uploader}</RTLText></span>
+                        )}
+                        {status.metadata?.view_count && (
+                          <span className="player-view-count">{status.metadata.view_count.toLocaleString()} views</span>
+                        )}
+                        {videoWidth && videoHeight && (
+                          <span className="player-resolution">{videoWidth} × {videoHeight}</span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    <div className="player-actions-section">
+                      <div className="player-action-buttons">
                         <button
-                          onClick={handleSaveMetadata}
-                          className="player-action-btn save-btn"
-                          title="Save video to library"
+                          onClick={handleSplit}
+                          className="player-action-btn clip-btn"
+                          disabled={!s3Url || !videoDuration}
+                          title="Split video (Press I for start, O for end)"
                         >
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
-                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                            <polyline points="17 21 17 13 7 13 7 21"/>
-                            <polyline points="7 3 7 8 15 8"/>
+                            <path d="M6 9H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2"/>
+                            <path d="M6 15H4a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2h-2"/>
+                            <line x1="6" y1="12" x2="18" y2="12"/>
                           </svg>
-                          <span>Save</span>
+                          <span>Clip</span>
                         </button>
-                      )}
+                        
+                        <a
+                          href={s3Url}
+                          download
+                          className="player-action-btn download-btn"
+                          title="Download video"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                          </svg>
+                          <span>Download</span>
+                        </a>
+                        
+                        {!savedFiles.some(file => file.s3_url === s3Url || file.job_id === jobId) && (
+                          <button
+                            onClick={handleSaveMetadata}
+                            className="player-action-btn save-btn"
+                            title="Save video to library"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
+                              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                              <polyline points="17 21 17 13 7 13 7 21"/>
+                              <polyline points="7 3 7 8 15 8"/>
+                            </svg>
+                            <span>Save</span>
+                          </button>
+                        )}
                     </div>
                   </div>
                 </div>
               )}
-              
+
               <div className="player-footer">
                 <button 
                   onClick={handleBackToMain}
@@ -1085,6 +1194,105 @@ function App() {
                   <span>Back to Saved Videos</span>
                 </button>
               </div>
+              </div>
+
+              {/* Storyboard Frames Section - Right Side Slider */}
+              {s3Url && status && status.stage === 'complete' && (
+                <div className="storyboard-section storyboard-sidebar">
+                  {storyboardFrames.length > 0 ? (
+                    <>
+                      <h3 className="storyboard-title">📽️ Scene Shots ({storyboardFrames.length})</h3>
+                      <div className="storyboard-frames-slider">
+                        {storyboardFrames.map((frame) => {
+                          // Use S3 URL directly if available, otherwise use API endpoint
+                          const imageUrl = frame.image_url && frame.image_url.startsWith('http') 
+                            ? frame.image_url 
+                            : frame.image_url 
+                              ? `${API_BASE_URL}${frame.image_url}`
+                              : null;
+                          
+                          if (!imageUrl) {
+                            console.warn('Frame missing image URL:', frame);
+                            return null;
+                          }
+                          
+                          // Format timestamp - convert to MM:SS format
+                          const formatStoryboardTime = (timeStr) => {
+                            if (!timeStr) return '00:00';
+                            // If it's in HH:MM:SS.mmm format, convert to MM:SS
+                            if (timeStr.includes(':')) {
+                              const parts = timeStr.split(':');
+                              if (parts.length === 3) {
+                                // HH:MM:SS.mmm format
+                                const hours = parseInt(parts[0]) || 0;
+                                const mins = parseInt(parts[1]) || 0;
+                                const secs = parseFloat(parts[2]) || 0;
+                                const totalMins = hours * 60 + mins;
+                                const secsInt = Math.floor(secs);
+                                return `${totalMins.toString().padStart(2, '0')}:${secsInt.toString().padStart(2, '0')}`;
+                              } else if (parts.length === 2) {
+                                // Already MM:SS format
+                                return timeStr.split('.')[0]; // Remove milliseconds if present
+                              }
+                            }
+                            // If it's a number (seconds), format it
+                            const seconds = parseFloat(timeStr);
+                            if (!isNaN(seconds)) {
+                              const mins = Math.floor(seconds / 60);
+                              const secs = Math.floor(seconds % 60);
+                              return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                            }
+                            return timeStr;
+                          };
+                          
+                          const displayTime = formatStoryboardTime(frame.time_str);
+                          
+                          return (
+                            <div
+                              key={frame.index}
+                              className="storyboard-frame-item"
+                              onClick={() => seekToTimestamp(frame.timestamp)}
+                              title={`Click to jump to ${displayTime}`}
+                            >
+                              <img
+                                src={imageUrl}
+                                alt={`Frame at ${displayTime}`}
+                                className="storyboard-frame-image"
+                                loading="lazy"
+                                onError={(e) => {
+                                  console.error('Failed to load storyboard frame:', imageUrl);
+                                  e.target.style.display = 'none';
+                                }}
+                              />
+                              <div className="storyboard-frame-info">
+                                <span className="storyboard-frame-time">{displayTime}</span>
+                                {frame.keywords && frame.keywords.length > 0 && (
+                                  <div className="storyboard-frame-keywords">
+                                    {frame.keywords.slice(0, 3).map((keyword, kwIdx) => (
+                                      <span key={kwIdx} className="storyboard-keyword-tag">
+                                        <RTLText>{keyword}</RTLText>
+                                      </span>
+                                    ))}
+                                    {frame.keywords.length > 3 && (
+                                      <span className="storyboard-keyword-more">
+                                        +{frame.keywords.length - 3}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="storyboard-loading">
+                      <p>Loading storyboard frames...</p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1092,7 +1300,7 @@ function App() {
         {error && (
           <div className="error-box">
             <h3>❌ Error</h3>
-            <p>{error}</p>
+            <p><RTLText>{error}</RTLText></p>
             <button onClick={handleReset} className="reset-btn">
               Try Again
             </button>
@@ -1118,7 +1326,7 @@ function App() {
                     {status.speed && <span>Speed: {status.speed}</span>}
                     {status.eta && <span>ETA: {status.eta}</span>}
                   </div>
-                  <p className="status-message">{status.message}</p>
+                  <p className="status-message"><RTLText>{status.message}</RTLText></p>
                   <button onClick={handleCancel} className="cancel-btn">
                     ⏹️ Cancel Download
                   </button>
@@ -1128,7 +1336,7 @@ function App() {
               {status.stage === 'cancelled' && (
                 <div className="error-section">
                   <h3>⏹️ Cancelled</h3>
-                  <p>{status.message || 'Download was cancelled'}</p>
+                  <p><RTLText>{status.message || 'Download was cancelled'}</RTLText></p>
                   <button onClick={handleReset} className="reset-btn">
                     Start New Download
                   </button>
@@ -1148,7 +1356,7 @@ function App() {
                     <span>{status.percent.toFixed(1)}%</span>
                     {status.speed && <span>Speed: {status.speed}</span>}
                   </div>
-                  <p className="status-message">{status.message}</p>
+                  <p className="status-message"><RTLText>{status.message}</RTLText></p>
                 </div>
               )}
 
@@ -1164,7 +1372,7 @@ function App() {
                   <div className="progress-info">
                     <span>{status.percent.toFixed(1)}%</span>
                   </div>
-                  <p className="status-message">{status.message}</p>
+                  <p className="status-message"><RTLText>{status.message}</RTLText></p>
                   <button onClick={handleCancel} className="cancel-btn">
                     ⏹️ Cancel Split
                   </button>
@@ -1175,7 +1383,7 @@ function App() {
               {status.stage === 'error' && (
                 <div className="error-section">
                   <h3>❌ Error</h3>
-                  <p>{status.message || 'An error occurred'}</p>
+                  <p><RTLText>{status.message || 'An error occurred'}</RTLText></p>
                   <button onClick={handleReset} className="reset-btn">
                     Try Again
                   </button>
@@ -1220,7 +1428,7 @@ function App() {
                     >
                       <option value="">No Playlist</option>
                       {playlists.map(playlist => (
-                        <option key={playlist.id} value={playlist.id}>
+                        <option key={playlist.id} value={playlist.id} dir={isPersianText(playlist.title) ? 'rtl' : 'ltr'}>
                           {playlist.title}
                         </option>
                       ))}

@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     
+    # Keyword extraction settings
+    keyword_extraction_backend: str = "auto"  # "openai", "blip", "basic", or "auto"
+    openai_api_key: Optional[str] = None  # Maps to OPENAI_API_KEY
+    openai_base_url: Optional[str] = None  # Maps to OPENAI_BASE_URL (for custom endpoints)
+    openai_model: str = "gpt-4o-mini"  # OpenAI model to use
+    keyword_max_count: int = 10  # Maximum number of keywords per frame
+    
     @property
     def s3_access_key_id(self) -> Optional[str]:
         """Get S3 access key ID."""
