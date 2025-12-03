@@ -1,0 +1,109 @@
+/* RTL Support for Persian/Arabic text */
+[dir="rtl"] {
+  direction: rtl !important;
+  text-align: right !important;
+  unicode-bidi: embed;
+}
+
+.video-title[dir="rtl"],
+.player-video-title[dir="rtl"],
+h1[dir="rtl"],
+h3[dir="rtl"] {
+  text-align: right !important;
+  direction: rtl !important;
+}
+
+.video-channel[dir="rtl"],
+.player-channel-name[dir="rtl"],
+p[dir="rtl"],
+span[dir="rtl"] {
+  text-align: right !important;
+  direction: rtl !important;
+}
+
+.storyboard-keyword-tag[dir="rtl"] {
+  text-align: right !important;
+  direction: rtl !important;
+}
+
+.error-box p[dir="rtl"],
+.status-message[dir="rtl"] {
+  text-align: right !important;
+  direction: rtl !important;
+}
+
+.input-group[dir="rtl"] .url-input {
+  padding-left: 20px;
+  padding-right: 16px;
+}
+
+.input-group[dir="rtl"] .submit-btn {
+  margin-left: 0;
+  margin-right: 10px;
+}
+
+.header[dir="rtl"] {
+  text-align: right;
+}
+
+.player-action-buttons[dir="rtl"] {
+  justify-content: flex-end;
+}
+
+.player-action-btn[dir="rtl"] {
+  flex-direction: row-reverse;
+}
+
+.player-action-btn[dir="rtl"] span {
+  margin-left: 8px;
+  margin-right: 0;
+}
+
+.player-action-btn[dir="rtl"] svg {
+  margin-left: 0;
+  margin-right: 8px;
+}
+
+
+.storyboard-section.storyboard-sidebar[dir="rtl"] {
+  border-left: none;
+  border-right: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.storyboard-frames-slider[dir="rtl"] {
+  direction: rtl;
+}
+
+.storyboard-frame-item[dir="rtl"] {
+  text-align: right;
+}
+
+.storyboard-frame-info[dir="rtl"] {
+  align-items: flex-end;
+}
+
+.storyboard-frame-keywords[dir="rtl"] {
+  justify-content: flex-end;
+}
+
+.playlist-modal-header[dir="rtl"] {
+  flex-direction: row-reverse;
+}
+
+.playlist-modal-actions[dir="rtl"] {
+  justify-content: flex-start;
+}
+
+.playlist-save-btn[dir="rtl"] {
+  flex-direction: row-reverse;
+}
+
+.playlist-save-btn[dir="rtl"] svg {
+  margin-left: 8px;
+  margin-right: 0;
+}
+
+.char-counter[dir="rtl"] {
+  text-align: left;
+}
+

@@ -1,0 +1,25 @@
+/* Header Styles */
+.header {
+  text-align: left;
+  margin-bottom: 32px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+}
+
+.header h1 {
+  font-size: 1.5rem;
+  font-weight: 400;
+  color: #0f0f0f;
+  margin-bottom: 8px;
+  letter-spacing: 0;
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+}
+
+.subtitle {
+  color: #606060;
+  font-size: 0.875rem;
+  font-weight: 400;
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+}
+
