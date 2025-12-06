@@ -378,6 +378,43 @@ class S3Uploader:
             print(f"Error generating presigned URL from key: {e}")
             return None
     
+    def generate_url_from_key(self, s3_key: str, content_type: str = 'video/mp4') -> Optional[str]:
+        """
+        Generate a URL from an S3 key using current settings.
+        This ensures URLs are always generated from current settings, not stored URLs.
+        
+        Args:
+            s3_key: S3 key (e.g., "videos/job_id/video_job_id.mp4")
+            content_type: Content type for presigned URLs (default: 'video/mp4')
+        
+        Returns:
+            URL string or None if failed
+        """
+        if not s3_key:
+            return None
+        
+        if not self.s3_client or not settings.s3_bucket:
+            return None
+        
+        try:
+            if settings.s3_public_urls:
+                # Public URL
+                if settings.s3_endpoint_url:
+                    return f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/{s3_key}"
+                else:
+                    return f"https://{settings.s3_bucket}.s3.{settings.s3_region}.amazonaws.com/{s3_key}"
+            else:
+                # Generate presigned URL
+                if content_type == 'text/html':
+                    return self._generate_presigned_url_storyboard(s3_key, content_type)
+                elif content_type == 'image/jpeg':
+                    return self._generate_presigned_url_storyboard(s3_key, content_type)
+                else:
+                    return self._generate_presigned_url(s3_key)
+        except Exception as e:
+            print(f"Error generating URL from key: {e}")
+            return None
+    
     async def upload_storyboard_html(
         self,
         html_path: str,
@@ -573,34 +610,64 @@ class S3Uploader:
             return None
     
     def extract_s3_key_from_url(self, s3_url: str) -> Optional[str]:
-        """Extract S3 key from a presigned URL or public URL."""
+        """
+        Extract S3 key from a presigned URL or public URL.
+        This method tries multiple patterns to extract the key, making it independent
+        of current settings so it can work with old URLs even if settings changed.
+        """
         try:
-            # If it's a presigned URL, extract the key from query params
-            if '?' in s3_url:
-                # Parse the URL to get the key
-                # Format: https://bucket.s3.region.amazonaws.com/videos/job_id/video_job_id.mp4?params
-                # or: https://endpoint/bucket/videos/job_id/video_job_id.mp4?params
-                url_parts = s3_url.split('?')[0]
+            from urllib.parse import urlparse, parse_qs
+            
+            # Remove query parameters for key extraction
+            url_without_params = s3_url.split('?')[0]
+            
+            # Try current settings first (for backward compatibility)
+            if settings.s3_bucket:
                 if settings.s3_endpoint_url:
-                    # Custom endpoint format
+                    # Custom endpoint format: https://endpoint/bucket/key
                     prefix = f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/"
-                    if url_parts.startswith(prefix):
-                        return url_parts[len(prefix):]
+                    if url_without_params.startswith(prefix):
+                        return url_without_params[len(prefix):]
                 else:
-                    # Standard S3 format
+                    # Standard S3 format: https://bucket.s3.region.amazonaws.com/key
                     prefix = f"https://{settings.s3_bucket}.s3.{settings.s3_region}.amazonaws.com/"
-                    if url_parts.startswith(prefix):
-                        return url_parts[len(prefix):]
-            else:
-                # Public URL without query params
-                if settings.s3_endpoint_url:
-                    prefix = f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/"
-                    if s3_url.startswith(prefix):
-                        return s3_url[len(prefix):]
-                else:
-                    prefix = f"https://{settings.s3_bucket}.s3.{settings.s3_region}.amazonaws.com/"
-                    if s3_url.startswith(prefix):
-                        return s3_url[len(prefix):]
+                    if url_without_params.startswith(prefix):
+                        return url_without_params[len(prefix):]
+            
+            # Try generic patterns that work regardless of settings
+            # Pattern 1: Standard S3 format - https://bucket.s3.region.amazonaws.com/key
+            # Match: https://[bucket].s3.[region].amazonaws.com/[key]
+            import re
+            s3_pattern = r'https://([^/]+)\.s3\.([^/]+)\.amazonaws\.com/(.+)'
+            match = re.match(s3_pattern, url_without_params)
+            if match:
+                return match.group(3)
+            
+            # Pattern 2: Custom endpoint format - https://endpoint/bucket/key
+            # Match: https://[endpoint]/[bucket]/[key]
+            # We need to identify where bucket ends and key starts
+            # Common S3 key patterns: videos/, thumbnails/, storyboards/
+            parsed = urlparse(url_without_params)
+            path_parts = parsed.path.strip('/').split('/')
+            
+            # Look for known key prefixes
+            known_prefixes = ['videos/', 'thumbnails/', 'storyboards/']
+            for i, part in enumerate(path_parts):
+                if any(part.startswith(prefix.rstrip('/')) for prefix in known_prefixes):
+                    # Found a known prefix, everything from here is the key
+                    return '/'.join(path_parts[i:])
+            
+            # Pattern 3: If path has 3+ parts, assume format is /bucket/prefix/key
+            # and key starts from the third part
+            if len(path_parts) >= 3:
+                # Assume: /bucket/videos/job_id/file.mp4
+                # Key would be: videos/job_id/file.mp4
+                return '/'.join(path_parts[1:])
+            
+            # Pattern 4: If path has 2 parts, assume format is /bucket/key
+            if len(path_parts) == 2:
+                return path_parts[1]
+            
             return None
         except Exception as e:
             print(f"Error extracting S3 key from URL: {e}")

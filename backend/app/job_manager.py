@@ -118,6 +118,23 @@ class JobManager:
                 return None
             
             job = self.jobs[job_id]
+            
+            # Generate fresh URL from s3_key if available (to use current settings)
+            s3_url = job.s3_url
+            if job.metadata:
+                # Check for s3_key in metadata and generate fresh URL
+                s3_key = job.metadata.get('s3_key')
+                if s3_key:
+                    try:
+                        from app.uploader import S3Uploader
+                        uploader = S3Uploader()
+                        fresh_url = uploader.generate_presigned_url_from_key(s3_key)
+                        if fresh_url:
+                            s3_url = fresh_url
+                    except Exception as e:
+                        # If URL generation fails, use stored URL as fallback
+                        print(f"Warning: Could not generate fresh URL from key: {e}")
+            
             return {
                 "jobId": job.job_id,
                 "stage": job.stage,
@@ -125,7 +142,7 @@ class JobManager:
                 "message": job.message,
                 "speed": job.speed,
                 "eta": job.eta,
-                "s3_url": job.s3_url,
+                "s3_url": s3_url,
                 "metadata": job.metadata,
                 "url": job.url
             }

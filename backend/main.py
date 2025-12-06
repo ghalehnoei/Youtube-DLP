@@ -532,6 +532,7 @@ async def get_storyboard_status(job_id: str):
 @app.get("/api/storyboard/{job_id}/html")
 async def get_storyboard_html(job_id: str):
     """Serve the generated storyboard HTML file."""
+    uploader = S3Uploader()
     status = job_manager.get_job_status(job_id)
     
     # If job not found in job manager, try to find it in saved files metadata
@@ -540,10 +541,12 @@ async def get_storyboard_html(job_id: str):
         for file in files:
             file_metadata = file.get('metadata', {})
             if file_metadata.get('storyboard_job_id') == job_id:
-                # Check if HTML S3 URL is in metadata
-                html_s3_url = file_metadata.get('storyboard_html_s3_url')
-                if html_s3_url:
-                    return RedirectResponse(url=html_s3_url)
+                # Generate URL from S3 key using current settings
+                html_s3_key = file_metadata.get('storyboard_html_s3_key')
+                if html_s3_key:
+                    html_s3_url = uploader.generate_url_from_key(html_s3_key, 'text/html')
+                    if html_s3_url:
+                        return RedirectResponse(url=html_s3_url)
                 break
     
     if not status:
@@ -553,12 +556,26 @@ async def get_storyboard_html(job_id: str):
     if not metadata:
         raise HTTPException(status_code=404, detail="Storyboard not found or not generated yet")
     
-    # Prefer S3 URL if available, otherwise use local path
+    # Generate URL from S3 key using current settings (preferred method)
+    html_s3_key = metadata.get('html_s3_key')
+    if html_s3_key:
+        html_s3_url = uploader.generate_url_from_key(html_s3_key, 'text/html')
+        if html_s3_url:
+            return RedirectResponse(url=html_s3_url)
+    
+    # Fallback to old stored URL (for backward compatibility)
     html_s3_url = metadata.get('html_s3_url')
     if html_s3_url:
-        # Redirect to S3 URL
+        # Try to extract key and generate fresh URL
+        extracted_key = uploader.extract_s3_key_from_url(html_s3_url)
+        if extracted_key:
+            fresh_url = uploader.generate_url_from_key(extracted_key, 'text/html')
+            if fresh_url:
+                return RedirectResponse(url=fresh_url)
+        # If extraction fails, use old URL (may not work if settings changed)
         return RedirectResponse(url=html_s3_url)
     
+    # Fallback to local path
     html_path = metadata.get('html_path')
     if not html_path or not os.path.exists(html_path):
         raise HTTPException(status_code=404, detail="Storyboard HTML file not found")
