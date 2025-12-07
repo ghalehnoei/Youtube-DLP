@@ -38,29 +38,34 @@ const VideoCard = ({ file, onPlay, onDelete, onTitleUpdate }) => {
   const uploader = file.metadata?.uploader || '';
   const titleIsPersian = isPersianText(title);
   const uploaderIsPersian = isPersianText(uploader);
+  
+  // Check if video is vertical (height > width)
+  const isVertical = file.video_height && file.video_width && file.video_height > file.video_width;
 
   return (
-    <div className="saved-video-card">
-      <div className="video-thumbnail-container" onClick={() => onPlay(file.s3_url)}>
+    <div className={`saved-video-card ${isVertical ? 'vertical-video' : ''}`}>
+      <div className={`video-thumbnail-container ${isVertical ? 'vertical-thumbnail' : ''}`} onClick={() => onPlay(file.s3_url)}>
         {file.thumbnail_url ? (
           <img 
             src={file.thumbnail_url} 
             alt={title}
-            className="video-thumbnail"
+            className={`video-thumbnail ${isVertical ? 'vertical-thumbnail-img' : ''}`}
           />
         ) : (
-          <div className="video-thumbnail-placeholder">
+          <div className={`video-thumbnail-placeholder ${isVertical ? 'vertical-thumbnail-img' : ''}`}>
             <span>📹</span>
           </div>
         )}
         <div className="video-duration-overlay">
           {file.metadata?.duration && formatDuration(file.metadata.duration)}
         </div>
-        <div className="play-overlay">
-          <svg viewBox="0 0 24 24" fill="white" width="48" height="48">
-            <path d="M8 5v14l11-7z"/>
-          </svg>
-        </div>
+        {!isVertical && (
+          <div className="play-overlay">
+            <svg viewBox="0 0 24 24" fill="white" width="48" height="48">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+          </div>
+        )}
       </div>
       <div className="video-info-card">
         {editingTitleId === file.id ? (

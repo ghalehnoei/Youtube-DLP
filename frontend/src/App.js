@@ -46,6 +46,7 @@ function App() {
   const [newPlaylistStatus, setNewPlaylistStatus] = useState('private');
   const [showCreatePlaylist, setShowCreatePlaylist] = useState(false);
   const [selectedPlaylistFilter, setSelectedPlaylistFilter] = useState(null);
+  const [isConverting, setIsConverting] = useState(false);
 
   // Track auto-saved job IDs to prevent duplicate saves
   const autoSavedJobIdsRef = useRef(new Set());
@@ -73,10 +74,14 @@ function App() {
 
   // WebSocket handlers
   const handleWebSocketMessage = useCallback((data) => {
+    console.log('WebSocket message received:', data);
+    console.log('Current jobId:', jobId);
+    console.log('Message stage:', data.stage);
     setStatus(data);
     
     if (data.stage === 'complete' && data.s3_url) {
       setS3Url(data.s3_url);
+      setIsConverting(false);
       if (data.metadata) {
         if (data.metadata.duration) {
           setVideoDuration(data.metadata.duration);
@@ -88,6 +93,10 @@ function App() {
       }
     } else if (data.stage === 'error') {
       setError(data.message || 'خطایی رخ داد');
+      setIsConverting(false);
+    } else if (data.stage === 'download' || data.stage === 'upload') {
+      // Keep isConverting true during conversion process
+      setIsConverting(true);
     }
   }, []);
 
@@ -340,6 +349,38 @@ function App() {
     }
   };
 
+  const handleConvert = async () => {
+    if (!s3Url || isConverting) return;
+    
+    setIsConverting(true);
+    setError(null);
+    
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/convert`, {
+        s3_url: s3Url
+      });
+      
+      const convertJobId = response.data.job_id;
+      setJobId(convertJobId);
+      // Set initial status to show user that conversion has started
+      setStatus({ 
+        stage: 'download', 
+        message: 'در حال دانلود ویدیو از S3...',
+        percent: 0
+      });
+      console.log('Convert job started with ID:', convertJobId);
+      // Keep original s3Url visible during conversion
+      // It will be updated when conversion completes via WebSocket
+    } catch (err) {
+      const errorMessage = err.response?.data?.detail || err.message || 'تبدیل ویدیو با خطا مواجه شد';
+      setError(errorMessage);
+      setIsConverting(false);
+      setStatus(null);
+      setJobId(null);
+      console.error('Error converting video:', err);
+    }
+  };
+
   const handleOpenPlayer = (s3Url) => {
     const file = savedFiles.find(f => f.s3_url === s3Url);
     setS3Url(s3Url);
@@ -487,6 +528,10 @@ function App() {
               storyboardFrames={storyboardFrames}
               onBack={handleBackToMain}
               onSeek={seekToTimestamp}
+              onConvert={handleConvert}
+              isConverting={isConverting}
+              onCancel={handleCancel}
+              onReset={handleReset}
             />
           )}
         </MainLayout>

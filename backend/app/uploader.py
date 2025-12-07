@@ -6,6 +6,7 @@ import os
 from typing import Optional, Callable
 from pathlib import Path
 from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.config import Config
 from app.config import settings
 import asyncio
 
@@ -20,6 +21,36 @@ class S3Uploader:
     def _init_s3_client(self):
         """Initialize S3 client with credentials."""
         try:
+            # Disable SSL verification if configured
+            if settings.no_check_certificate:
+                # Patch botocore's HTTPSession to disable SSL verification
+                # This must be done before creating any boto3 clients
+                try:
+                    import botocore.httpsession
+                    if not hasattr(botocore.httpsession.URLLib3Session, '_ssl_patched'):
+                        original_init = botocore.httpsession.URLLib3Session.__init__
+                        
+                        def patched_init(self, *args, **kwargs):
+                            kwargs['verify'] = False
+                            return original_init(self, *args, **kwargs)
+                        
+                        botocore.httpsession.URLLib3Session.__init__ = patched_init
+                        botocore.httpsession.URLLib3Session._ssl_patched = True
+                        
+                        # Disable urllib3 warnings about insecure requests
+                        import urllib3
+                        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                except Exception as patch_error:
+                    print(f"Warning: Could not patch SSL verification: {patch_error}")
+            
+            # Create config for boto3 client
+            config = Config(
+                connect_timeout=60,
+                read_timeout=60,
+                retries={'max_attempts': 3},
+                signature_version='s3v4'
+            )
+            
             if settings.s3_endpoint_url:
                 # For S3-compatible services (MinIO, etc.)
                 self.s3_client = boto3.client(
@@ -27,7 +58,8 @@ class S3Uploader:
                     endpoint_url=settings.s3_endpoint_url,
                     aws_access_key_id=settings.s3_access_key_id,
                     aws_secret_access_key=settings.s3_secret_access_key,
-                    region_name=settings.s3_region
+                    region_name=settings.s3_region,
+                    config=config
                 )
             else:
                 # Standard AWS S3
@@ -36,11 +68,13 @@ class S3Uploader:
                         's3',
                         aws_access_key_id=settings.s3_access_key_id,
                         aws_secret_access_key=settings.s3_secret_access_key,
-                        region_name=settings.s3_region
+                        region_name=settings.s3_region,
+                        config=config
                     )
                 else:
                     # Use default credentials (IAM role, environment, etc.)
-                    self.s3_client = boto3.client('s3', region_name=settings.s3_region)
+                    self.s3_client = boto3.client('s3', region_name=settings.s3_region, config=config)
+                    
         except Exception as e:
             print(f"Error initializing S3 client: {e}")
             self.s3_client = None

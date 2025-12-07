@@ -160,6 +160,10 @@ class VideoDownloader:
             'print': ['after_move:filepath'],  # Print final filepath after post-processing
         }
         
+        # Add SSL certificate verification setting
+        if settings.no_check_certificate:
+            ydl_opts['no_check_certificate'] = True
+        
         # Add FFmpeg location if available (for yt-dlp to use)
         ffmpeg_path = self._get_ffmpeg_path()
         if ffmpeg_path:

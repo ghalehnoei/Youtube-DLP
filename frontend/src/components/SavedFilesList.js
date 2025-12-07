@@ -22,6 +22,15 @@ const SavedFilesList = ({
     return title.includes(query) || uploader.includes(query);
   });
 
+  // Separate vertical and horizontal videos
+  const verticalVideos = filteredFiles.filter(file => {
+    return file.video_height && file.video_width && file.video_height > file.video_width;
+  });
+
+  const horizontalVideos = filteredFiles.filter(file => {
+    return !file.video_height || !file.video_width || file.video_height <= file.video_width;
+  });
+
   return (
     <div className="saved-files-section">
       <div className="saved-files-header">
@@ -55,17 +64,49 @@ const SavedFilesList = ({
           </button>
         </div>
       </div>
-      <div className="saved-files-grid">
-        {filteredFiles.map((file) => (
-          <VideoCard
-            key={file.id}
-            file={file}
-            onPlay={onPlay}
-            onDelete={onDelete}
-            onTitleUpdate={onTitleUpdate}
-          />
-        ))}
-      </div>
+
+      {/* Horizontal Videos Section */}
+      {horizontalVideos.length > 0 && (
+        <div className="videos-section horizontal-videos-section">
+          <h3 className="section-title">ویدیوهای افقی</h3>
+          <div className="saved-files-grid horizontal-videos-grid">
+            {horizontalVideos.map((file) => (
+              <VideoCard
+                key={file.id}
+                file={file}
+                onPlay={onPlay}
+                onDelete={onDelete}
+                onTitleUpdate={onTitleUpdate}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Vertical Videos Section */}
+      {verticalVideos.length > 0 && (
+        <div className="videos-section vertical-videos-section">
+          <h3 className="section-title">ویدیوهای عمودی</h3>
+          <div className="saved-files-grid vertical-videos-grid">
+            {verticalVideos.map((file) => (
+              <VideoCard
+                key={file.id}
+                file={file}
+                onPlay={onPlay}
+                onDelete={onDelete}
+                onTitleUpdate={onTitleUpdate}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {filteredFiles.length === 0 && (
+        <div className="empty-state">
+          <p>ویدیویی یافت نشد</p>
+        </div>
+      )}
     </div>
   );
 };

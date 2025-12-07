@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     temp_dir: str = "./tmp/jobs"
     allowed_hosts: Optional[str] = None
     ffmpeg_path: Optional[str] = None  # Custom FFmpeg path if not in PATH
+    no_check_certificate: Union[bool, str] = False  # Disable SSL certificate verification (for development/testing)
+    
+    @field_validator('no_check_certificate', mode='before')
+    @classmethod
+    def parse_no_check_certificate(cls, v):
+        """Convert string to boolean."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.lower() == "true"
+        return False
     
     # Server settings
     host: str = "0.0.0.0"

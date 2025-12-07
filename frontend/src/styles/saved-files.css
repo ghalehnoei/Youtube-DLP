@@ -5,6 +5,51 @@
   padding: 0;
 }
 
+.videos-section {
+  margin-bottom: 48px;
+}
+
+.videos-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #0f0f0f;
+  margin: 0 0 20px 24px;
+  padding-top: 24px;
+  font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
+}
+
+.dark-mode .section-title {
+  color: #ffffff;
+}
+
+.horizontal-videos-section {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  padding-bottom: 32px;
+}
+
+.dark-mode .horizontal-videos-section {
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+.vertical-videos-section {
+  padding-top: 8px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  color: #606060;
+  font-size: 1rem;
+}
+
+.dark-mode .empty-state {
+  color: #aaaaaa;
+}
+
 .saved-files-header {
   display: none; /* Hide header when using MainLayout */
 }
@@ -62,6 +107,47 @@
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 16px;
   padding: 24px;
+}
+
+.vertical-videos-grid {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+}
+
+/* Vertical videos - display as smaller thumbnails */
+.saved-video-card.vertical-video {
+  max-width: 180px;
+  margin: 0 auto;
+}
+
+.saved-video-card.vertical-video .video-thumbnail-container {
+  padding-bottom: 177.78%; /* 16:9 aspect ratio for vertical videos (height/width) */
+  border-radius: 12px;
+}
+
+.saved-video-card.vertical-video .video-thumbnail-img,
+.saved-video-card.vertical-video .video-thumbnail-placeholder {
+  object-fit: cover;
+  width: 100%;
+  height: 100%;
+}
+
+/* Vertical video specific styles */
+.saved-video-card.vertical-video .video-info-card {
+  margin-top: 8px;
+}
+
+.saved-video-card.vertical-video .video-title {
+  font-size: 0.8125rem;
+  line-height: 1.2;
+}
+
+.saved-video-card.vertical-video .video-meta-card {
+  font-size: 0.75rem;
+}
+
+.saved-video-card.vertical-video .video-actions-card {
+  margin-top: 8px;
+  padding-top: 8px;
 }
 
 @media (min-width: 2000px) {

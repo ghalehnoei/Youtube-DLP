@@ -915,15 +915,14 @@ async def process_video(
         metadata = downloader.get_metadata()
         job_manager.set_job_metadata(job_id, metadata)
         
-        # Check if video is vertical and convert to horizontal automatically
-        # First try metadata, if not available, probe the file
+        # Get video dimensions for metadata (no automatic conversion)
         video_width = metadata.get('width')
         video_height = metadata.get('height')
         
         # If dimensions not in metadata, probe the file
-        converter = VideoConverter()
         if not video_width or not video_height:
             try:
+                converter = VideoConverter()
                 if converter.ffmpeg_path:
                     import subprocess as sp
                     probe_cmd = [converter.ffmpeg_path, '-i', file_path, '-hide_banner']
@@ -937,59 +936,28 @@ async def process_video(
                             video_height = int(dimension_match.group(2))
                             metadata['width'] = video_width
                             metadata['height'] = video_height
+                            job_manager.set_job_metadata(job_id, metadata)
             except Exception as e:
                 print(f"Warning: Could not probe video dimensions: {e}")
-        
-        is_vertical = video_height > video_width if video_width and video_height else False
-        
-        final_file_path = file_path
-        
-        if is_vertical and converter.ffmpeg_path:
-            # Convert vertical video to horizontal 1920x1080
-            try:
-                job_manager.update_job_status(job_id, "upload", 0, "Converting vertical video to horizontal...")
-                converted_path = await converter.convert_to_horizontal(
-                    input_file_path=file_path,
-                    progress_callback=lambda p, s: job_manager.update_job_status(
-                        job_id, "upload", p * 0.4, s  # Use first 40% for conversion
-                    ),
-                    cancellation_check=lambda: job_manager.is_cancelled(job_id),
-                    job_id=job_id
-                )
-                if converted_path:
-                    # Clean up original file
-                    try:
-                        if Path(file_path).exists():
-                            os.remove(file_path)
-                    except:
-                        pass
-                    final_file_path = converted_path
-                    # Update metadata dimensions
-                    metadata['width'] = 1920
-                    metadata['height'] = 1080
-                    metadata['converted_to_horizontal'] = True
-            except Exception as e:
-                print(f"Warning: Could not convert vertical video: {e}")
-                # Continue with original file
         
         # Generate thumbnail before uploading (file will be deleted after upload)
         thumbnail_path = None
         try:
-            job_manager.update_job_status(job_id, "upload", 40 if is_vertical else 0, "Generating thumbnail...")
+            job_manager.update_job_status(job_id, "upload", 0, "Generating thumbnail...")
             thumbnail_gen = ThumbnailGenerator()
-            thumbnail_path = thumbnail_gen.generate_thumbnail(final_file_path)
+            thumbnail_path = thumbnail_gen.generate_thumbnail(file_path)
         except Exception as e:
             print(f"Warning: Could not generate thumbnail: {e}")
         
         # Notify upload start
-        job_manager.update_job_status(job_id, "upload", 50 if is_vertical else 10, "Starting upload to S3...")
+        job_manager.update_job_status(job_id, "upload", 10, "Starting upload to S3...")
         
         # Upload to S3
         s3_url = await uploader.upload(
-            file_path=final_file_path,
+            file_path=file_path,
             job_id=job_id,
             progress_callback=lambda p, s: job_manager.update_job_status(
-                job_id, "upload", (50 if is_vertical else 10) + (p * 0.35), f"Uploading... {s}"  # Reserve for upload
+                job_id, "upload", 10 + (p * 0.8), f"Uploading... {s}"  # Reserve for upload
             )
         )
         
@@ -1191,6 +1159,43 @@ async def cancel_job(job_id: str):
             detail="Job cannot be cancelled (may already be complete, error, or not found)"
         )
     return {"status": "cancelled", "message": "Job cancellation requested"}
+
+
+class ConvertRequest(BaseModel):
+    s3_url: str  # S3 URL of the video to convert
+
+
+@app.post("/api/convert", response_model=JobResponse)
+async def start_convert(request: ConvertRequest):
+    """
+    Start a video conversion job to convert vertical video to horizontal 1920x1080.
+    Downloads the video from S3, converts it, and uploads the converted version.
+    Returns a job_id that can be used to track progress via WebSocket.
+    """
+    # Validate S3 configuration
+    if not settings.s3_bucket:
+        raise HTTPException(
+            status_code=500,
+            detail="S3 bucket not configured. Please set S3_BUCKET environment variable."
+        )
+    
+    job_id = str(uuid.uuid4())
+    
+    # Create job
+    job_manager.create_job(job_id, f"convert:{request.s3_url}")
+    
+    # Start conversion process in background
+    task = asyncio.create_task(process_convert(
+        job_id,
+        request.s3_url
+    ))
+    job_manager.set_job_task(job_id, task)
+    
+    return JobResponse(
+        job_id=job_id,
+        status="started",
+        message="Conversion job started. Connect to WebSocket to track progress."
+    )
 
 
 @app.post("/api/split", response_model=JobResponse)
@@ -1674,6 +1679,256 @@ async def process_split(
         error_str = str(e) if e else "Unknown error"
         job_manager.update_job_status(job_id, "error", 0, f"Error: {error_str}")
         print(f"Error processing split job {job_id}: {error_str}")
+        import traceback
+        traceback.print_exc()
+
+
+async def process_convert(
+    job_id: str,
+    s3_url: str
+):
+    """
+    Process video conversion: Download from S3, convert to horizontal 1920x1080, and upload back to S3.
+    """
+    converter = VideoConverter()
+    uploader = S3Uploader()
+    
+    try:
+        # Check if cancelled before starting
+        if job_manager.is_cancelled(job_id):
+            return
+        
+        # Notify download start
+        print(f"Convert job {job_id}: Notifying download start")
+        job_manager.update_job_status(job_id, "download", 0, "Downloading video from S3...")
+        print(f"Convert job {job_id}: Download notification sent")
+        
+        # Download video from S3 URL
+        # We'll use httpx to download the video
+        import httpx
+        temp_dir = Path(settings.temp_dir) / "conversions" / job_id
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file_path = temp_dir / "input_video.mp4"
+        
+        try:
+            # Configure SSL verification based on settings
+            verify_ssl = not settings.no_check_certificate
+            async with httpx.AsyncClient(timeout=300.0, verify=verify_ssl) as client:
+                async with client.stream('GET', s3_url) as response:
+                    if response.status_code != 200:
+                        raise Exception(f"Failed to download video from S3: HTTP {response.status_code}")
+                    
+                    # Write to temp file
+                    with open(temp_file_path, 'wb') as f:
+                        async for chunk in response.aiter_bytes():
+                            if job_manager.is_cancelled(job_id):
+                                raise Exception("Conversion cancelled")
+                            f.write(chunk)
+        except Exception as e:
+            if "cancelled" in str(e).lower():
+                job_manager.update_job_status(job_id, "cancelled", 0, "Conversion cancelled")
+            else:
+                job_manager.update_job_status(job_id, "error", 0, f"Failed to download video: {str(e)}")
+            return
+        
+        # Check if cancelled after download
+        if job_manager.is_cancelled(job_id):
+            if temp_file_path.exists():
+                try:
+                    os.remove(temp_file_path)
+                except:
+                    pass
+            return
+        
+        # Notify conversion start
+        print(f"Convert job {job_id}: Notifying conversion start")
+        job_manager.update_job_status(job_id, "upload", 0, "Converting video to horizontal 1920x1080...")
+        print(f"Convert job {job_id}: Conversion notification sent")
+        
+        # Convert video to horizontal
+        converted_file_path = None
+        try:
+            converted_file_path = await converter.convert_to_horizontal(
+                input_file_path=str(temp_file_path),
+                progress_callback=lambda p, s: job_manager.update_job_status(
+                    job_id, "upload", p * 0.5, s  # Use first 50% for conversion
+                ),
+                cancellation_check=lambda: job_manager.is_cancelled(job_id),
+                job_id=job_id
+            )
+        except Exception as e:
+            error_str = str(e) if e else "Unknown error"
+            job_manager.update_job_status(
+                job_id, "error", 0, f"Failed to convert video: {error_str}"
+            )
+            # Clean up temp file
+            try:
+                if temp_file_path.exists():
+                    os.remove(temp_file_path)
+            except:
+                pass
+            return
+        
+        if not converted_file_path:
+            job_manager.update_job_status(job_id, "error", 0, "Conversion failed: No output file created")
+            # Clean up temp file
+            try:
+                if temp_file_path.exists():
+                    os.remove(temp_file_path)
+            except:
+                pass
+            return
+        
+        # Check if cancelled after conversion
+        if job_manager.is_cancelled(job_id):
+            if converted_file_path and Path(converted_file_path).exists():
+                try:
+                    os.remove(converted_file_path)
+                except:
+                    pass
+            try:
+                if temp_file_path.exists():
+                    os.remove(temp_file_path)
+            except:
+                pass
+            return
+        
+        # Clean up downloaded file
+        try:
+            if temp_file_path.exists():
+                os.remove(temp_file_path)
+        except:
+            pass
+        
+        # Generate thumbnail before uploading
+        thumbnail_path = None
+        try:
+            job_manager.update_job_status(job_id, "upload", 50, "Generating thumbnail...")
+            thumbnail_gen = ThumbnailGenerator()
+            thumbnail_path = thumbnail_gen.generate_thumbnail(converted_file_path)
+        except Exception as e:
+            print(f"Warning: Could not generate thumbnail: {e}")
+        
+        # Notify upload start
+        job_manager.update_job_status(job_id, "upload", 60, "Uploading converted video to S3...")
+        
+        # Upload to S3
+        s3_url_new = await uploader.upload(
+            file_path=converted_file_path,
+            job_id=job_id,
+            progress_callback=lambda p, s: job_manager.update_job_status(
+                job_id, "upload", 60 + (p * 0.3), f"Uploading... {s}"  # Reserve 60-90% for upload
+            )
+        )
+        
+        if s3_url_new:
+            # Extract S3 key from URL for storage
+            s3_key = uploader.extract_s3_key_from_url(s3_url_new)
+            
+            # Get original metadata if available (from original S3 URL)
+            original_metadata = {}
+            original_s3_key = uploader.extract_s3_key_from_url(s3_url)
+            if original_s3_key:
+                # Try to find original file in metadata store
+                all_files = metadata_store.get_all()
+                for file in all_files:
+                    if file.get('s3_key') == original_s3_key:
+                        original_metadata = file.get('metadata', {})
+                        break
+            
+            # Create new metadata
+            new_metadata = original_metadata.copy() if original_metadata else {}
+            new_metadata['title'] = new_metadata.get('title', 'Video') + ' (Converted to Horizontal)'
+            new_metadata['width'] = 1920
+            new_metadata['height'] = 1080
+            new_metadata['converted_to_horizontal'] = True
+            new_metadata['is_converted'] = True
+            if s3_key:
+                new_metadata['s3_key'] = s3_key
+            
+            # Upload thumbnail if generated
+            thumbnail_url = None
+            thumbnail_key = None
+            if thumbnail_path:
+                try:
+                    job_manager.update_job_status(job_id, "upload", 90, "Uploading thumbnail...")
+                    thumbnail_url = await uploader.upload_thumbnail(
+                        thumbnail_path=thumbnail_path,
+                        job_id=job_id
+                    )
+                    # Extract thumbnail key
+                    if thumbnail_url:
+                        thumbnail_key = uploader.extract_s3_key_from_url(thumbnail_url)
+                        if thumbnail_key:
+                            new_metadata['thumbnail_key'] = thumbnail_key
+                    # Clean up local thumbnail
+                    try:
+                        os.remove(thumbnail_path)
+                    except:
+                        pass
+                except Exception as e:
+                    print(f"Warning: Could not upload thumbnail: {e}")
+            
+            # Add thumbnail URL to metadata
+            if thumbnail_url:
+                new_metadata['thumbnail_url'] = thumbnail_url
+            
+            # Success
+            job_manager.complete_job(job_id, s3_url_new, new_metadata)
+            
+            # Automatically save converted video to metadata store
+            try:
+                from datetime import datetime
+                metadata_dict = {
+                    "s3_url": s3_url_new,
+                    "s3_key": s3_key,
+                    "job_id": job_id,
+                    "metadata": new_metadata,
+                    "video_width": 1920,
+                    "video_height": 1080,
+                    "thumbnail_url": thumbnail_url,
+                    "thumbnail_key": thumbnail_key,
+                    "playlist_id": None,  # Converted videos are not auto-assigned to playlists
+                    "created_at": datetime.now().isoformat()
+                }
+                file_id = metadata_store.save(metadata_dict)
+                print(f"Auto-saved converted video to metadata store with ID: {file_id}")
+            except Exception as e:
+                # Don't fail the main job if auto-save fails
+                print(f"Warning: Failed to auto-save converted video: {e}")
+            
+            # Automatically generate storyboard after successful upload
+            try:
+                storyboard_job_id = str(uuid.uuid4())
+                job_manager.create_job(storyboard_job_id, f"storyboard:{s3_url_new}")
+                
+                # Start storyboard generation in background
+                storyboard_task = asyncio.create_task(process_storyboard(
+                    storyboard_job_id,
+                    s3_url_new,
+                    0.3,  # Default threshold
+                    320,  # Default thumbnail width
+                    180   # Default thumbnail height
+                ))
+                job_manager.set_job_task(storyboard_job_id, storyboard_task)
+                
+                # Store storyboard job_id in job metadata
+                new_metadata['storyboard_job_id'] = storyboard_job_id
+                job_manager.set_job_metadata(job_id, new_metadata)
+                
+                print(f"Started automatic storyboard generation for convert job {job_id} -> storyboard job {storyboard_job_id}")
+            except Exception as e:
+                # Don't fail the main job if storyboard generation fails to start
+                print(f"Warning: Failed to start automatic storyboard generation: {e}")
+        else:
+            job_manager.update_job_status(
+                job_id, "error", 0, "Upload failed: Could not upload to S3"
+            )
+    
+    except Exception as e:
+        error_str = str(e) if e else "Unknown error"
+        job_manager.update_job_status(job_id, "error", 0, f"Error: {error_str}")
+        print(f"Error processing convert job {job_id}: {error_str}")
         import traceback
         traceback.print_exc()
 
