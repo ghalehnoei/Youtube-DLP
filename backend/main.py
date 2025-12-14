@@ -25,7 +25,13 @@ from app.thumbnail_generator import ThumbnailGenerator
 from app.video_converter import VideoConverter
 from app.playlist_store import PlaylistStore
 from app.storyboard_generator import StoryboardGenerator
-from fastapi import UploadFile, File
+from app.database import init_db, close_db
+from app.user_store import UserStore
+from app.auth import create_access_token, verify_token
+from fastapi import UploadFile, File, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 # Global job manager
 job_manager = JobManager()
@@ -36,19 +42,70 @@ metadata_store = MetadataStore()
 # Global playlist store
 playlist_store = PlaylistStore()
 
+# Global user store
+user_store = UserStore()
+
+# Security scheme for JWT
+security = HTTPBearer()
+
+# Global thread pool executor for concurrent operations
+# Use max_workers based on CPU count, with minimum of 10 and maximum of 50
+# This allows multiple jobs to run concurrently without blocking
+_executor = None
+
+def get_executor() -> ThreadPoolExecutor:
+    """Get the global thread pool executor."""
+    global _executor
+    if _executor is None:
+        # Calculate optimal number of workers
+        # For I/O-bound tasks (downloads, uploads), we can use more threads
+        cpu_count = multiprocessing.cpu_count()
+        max_workers = max(10, min(50, cpu_count * 4))
+        _executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="worker")
+        print(f"Created thread pool executor with {max_workers} workers")
+    return _executor
+
+
+async def run_in_executor(func, *args, **kwargs):
+    """Run a function in the global thread pool executor."""
+    loop = asyncio.get_event_loop()
+    executor = get_executor()
+    return await loop.run_in_executor(executor, func, *args, **kwargs)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     # Startup
     print("Starting application...")
+    # Initialize database
+    try:
+        init_db()
+        print("Database initialized successfully.")
+    except Exception as e:
+        print(f"Warning: Database initialization failed: {e}")
+        print("The application will continue but database features may not work.")
     # Store the main event loop for worker thread notifications
     loop = asyncio.get_event_loop()
     job_manager.set_main_loop(loop)
+    # Initialize executor
+    get_executor()
     yield
     # Shutdown
     print("Shutting down application...")
     job_manager.cleanup_all_jobs()
+    # Close database connections
+    try:
+        close_db()
+        print("Database connections closed.")
+    except Exception as e:
+        print(f"Error closing database: {e}")
+    # Shutdown executor
+    global _executor
+    if _executor:
+        _executor.shutdown(wait=True)
+        _executor = None
+        print("Thread pool executor shut down")
 
 
 app = FastAPI(
@@ -93,6 +150,25 @@ class UploadResponse(BaseModel):
     message: str
 
 
+# Authentication models
+class RegisterRequest(BaseModel):
+    phone_number: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    phone_number: str
+    password: str  # Currently fixed to "111111"
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: Dict[str, Any]
+
+
 class StoryboardRequest(BaseModel):
     video_url: str  # Can be S3 URL, local file path, or HTTP URL
     threshold: Optional[float] = 0.3  # Scene change detection threshold (0.0-1.0)
@@ -104,6 +180,112 @@ class StoryboardRequest(BaseModel):
 async def root():
     """Health check endpoint"""
     return {"status": "ok", "message": "Video Download & S3 Upload Service"}
+
+
+# Authentication endpoints
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
+    """Dependency to get current authenticated user."""
+    token = credentials.credentials
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user_id = payload.get("user_id")
+    user = user_store.get_user_by_id(user_id)
+    if not user or not user.get("is_active"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return user
+
+
+@app.post("/api/auth/register", response_model=AuthResponse)
+async def register(request: RegisterRequest):
+    """Register a new user."""
+    try:
+        # Normalize phone number (remove spaces, dashes, etc.)
+        phone_number = request.phone_number.replace(" ", "").replace("-", "").replace("+", "")
+        
+        # Create user
+        user_id = user_store.create_user(
+            phone_number=phone_number,
+            first_name=request.first_name,
+            last_name=request.last_name,
+            email=request.email
+        )
+        
+        # Get created user
+        user = user_store.get_user_by_id(user_id)
+        if not user:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        
+        # Create access token
+        access_token = create_access_token(user_id, phone_number)
+        
+        return AuthResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user=user
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+async def login(request: LoginRequest):
+    """Login user with phone number and password."""
+    try:
+        # Normalize phone number
+        phone_number = request.phone_number.replace(" ", "").replace("-", "").replace("+", "")
+        
+        # Verify password (currently fixed to "111111")
+        if not user_store.verify_password(request.password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid password"
+            )
+        
+        # Get user
+        user = user_store.get_user_by_phone(phone_number)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found. Please register first."
+            )
+        
+        if not user.get("is_active"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User account is inactive"
+            )
+        
+        # Create access token
+        access_token = create_access_token(user["id"], phone_number)
+        
+        return AuthResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user=user
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+
+
+@app.get("/api/auth/me")
+async def get_current_user_info(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Get current authenticated user information."""
+    return current_user
 
 
 @app.post("/api/download", response_model=JobResponse)
@@ -387,45 +569,11 @@ async def process_storyboard(
             job_manager.complete_job(job_id, complete_url, metadata)
             
             # Also store frames in parent job metadata if this is a storyboard job
-            # Find parent job by checking if any job has this storyboard_job_id
+            # Find parent job by checking job_manager first (more reliable), then metadata_store
             try:
-                files = metadata_store.get_all()
-                updated_count = 0
-                for file in files:
-                    file_metadata = file.get('metadata', {})
-                    if file_metadata.get('storyboard_job_id') == job_id:
-                        # Found parent file, update its metadata with storyboard frames
-                        # Get the current metadata and merge with new storyboard data
-                        current_metadata = file.get('metadata', {})
-                        current_metadata = current_metadata.copy() if current_metadata else {}
-                        current_metadata['frames'] = uploaded_frames
-                        current_metadata['storyboard_html_s3_url'] = html_s3_url
-                        current_metadata['storyboard_html_s3_key'] = html_s3_key
-                        current_metadata['storyboard_completed'] = True
-                        current_metadata['storyboard_frame_count'] = len(uploaded_frames)
-                        if metadata_store.update(file.get('id'), {'metadata': current_metadata}):
-                            updated_count += 1
-                            print(f"✅ Updated parent file {file.get('id')} with storyboard frames ({len(uploaded_frames)} frames)")
-                            # Verify the update worked
-                            updated_file = metadata_store.get_by_id(file.get('id'))
-                            if updated_file:
-                                updated_metadata = updated_file.get('metadata', {})
-                                if 'frames' in updated_metadata:
-                                    print(f"✅ Verified: Parent file now has {len(updated_metadata.get('frames', []))} frames in metadata")
-                                else:
-                                    print(f"❌ Warning: Parent file update may have failed - frames not found after update")
-                        else:
-                            print(f"❌ Failed to update parent file {file.get('id')}")
+                parent_found = False
                 
-                if updated_count == 0:
-                    print(f"⚠️ Warning: No parent file found with storyboard_job_id={job_id}")
-                    print(f"   Searched {len(files)} files")
-                    # Debug: print all storyboard_job_ids found
-                    found_job_ids = [f.get('metadata', {}).get('storyboard_job_id') for f in files if f.get('metadata', {}).get('storyboard_job_id')]
-                    print(f"   Found storyboard_job_ids: {found_job_ids[:5]}...")  # Show first 5
-                
-                # Also check if there's a parent job in job manager
-                # Find all jobs and check if any have this storyboard_job_id
+                # First, check job_manager for parent job (most reliable)
                 with job_manager._lock:
                     all_jobs = list(job_manager.jobs.values())
                 for job in all_jobs:
@@ -437,8 +585,37 @@ async def process_storyboard(
                         job_metadata['storyboard_html_s3_url'] = html_s3_url
                         job_metadata['storyboard_html_s3_key'] = html_s3_key
                         job_manager.set_job_metadata(job.job_id, job_metadata)
-                        print(f"Updated parent job {job.job_id} with storyboard frames ({len(uploaded_frames)} frames)")
+                        print(f"✅ Updated parent job {job.job_id} with storyboard frames ({len(uploaded_frames)} frames)")
+                        parent_found = True
                         break
+                
+                # Then check metadata_store for saved files
+                files = metadata_store.get_all()
+                updated_count = 0
+                for file in files:
+                    file_metadata = file.get('metadata', {})
+                    if file_metadata.get('storyboard_job_id') == job_id:
+                        # Found parent file, update its metadata with storyboard frames
+                        current_metadata = file.get('metadata', {})
+                        current_metadata = current_metadata.copy() if current_metadata else {}
+                        current_metadata['frames'] = uploaded_frames
+                        current_metadata['storyboard_html_s3_url'] = html_s3_url
+                        current_metadata['storyboard_html_s3_key'] = html_s3_key
+                        current_metadata['storyboard_completed'] = True
+                        current_metadata['storyboard_frame_count'] = len(uploaded_frames)
+                        if metadata_store.update(file.get('id'), {'metadata': current_metadata}):
+                            updated_count += 1
+                            print(f"✅ Updated parent file {file.get('id')} with storyboard frames ({len(uploaded_frames)} frames)")
+                            parent_found = True
+                
+                # Only show warning if parent wasn't found in either location
+                if not parent_found:
+                    print(f"⚠️ Warning: No parent job/file found with storyboard_job_id={job_id}")
+                    print(f"   Searched {len(all_jobs)} jobs and {len(files)} files")
+                    # This is usually fine - the file might not be saved to metadata_store yet
+                    # The frames are still stored in the storyboard job metadata and will be
+                    # available when the parent file is saved
+                    
             except Exception as e:
                 print(f"Warning: Could not update parent job/file with storyboard frames: {e}")
                 import traceback
@@ -594,6 +771,67 @@ async def get_storyboard_html(job_id: str):
 async def get_storyboard_frames(job_id: str):
     """Get all storyboard frames for a video job."""
     status = job_manager.get_job_status(job_id)
+    
+    # If job found in job manager, check if it's a storyboard job with frames
+    if status:
+        metadata = status.get('metadata', {})
+        # Check if this job has frames directly (it's a storyboard job)
+        if 'frames' in metadata and metadata['frames']:
+            frames = metadata['frames']
+            uploader = S3Uploader()
+            valid_frames = []
+            for idx, frame in enumerate(frames):
+                if not isinstance(frame, dict):
+                    continue
+                frame_index = frame.get('index', idx)
+                image_url = f"/api/storyboard/{job_id}/frame/{frame_index}"
+                s3_key = frame.get('image_s3_key')
+                if s3_key:
+                    fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+                    if fresh_url:
+                        image_url = fresh_url
+                valid_frames.append({
+                    "index": frame_index,
+                    "timestamp": frame.get('timestamp', 0),
+                    "time_str": frame.get('time_str', '00:00'),
+                    "image_url": image_url,
+                    "keywords": frame.get('keywords', [])
+                })
+            if valid_frames:
+                return {"frames": valid_frames}
+        # If storyboard job is still processing, return empty array instead of 404
+        if status.get('stage') == 'storyboard':
+            return {"frames": []}
+        # If no frames in this job, check if it has a storyboard_job_id pointing to another job
+        storyboard_job_id = metadata.get('storyboard_job_id') if metadata else None
+        if storyboard_job_id:
+            # Get frames from the storyboard job
+            storyboard_status = job_manager.get_job_status(storyboard_job_id)
+            if storyboard_status:
+                storyboard_metadata = storyboard_status.get('metadata', {})
+                if storyboard_metadata and 'frames' in storyboard_metadata:
+                    frames = storyboard_metadata['frames']
+                    uploader = S3Uploader()
+                    valid_frames = []
+                    for idx, frame in enumerate(frames):
+                        if not isinstance(frame, dict):
+                            continue
+                        frame_index = frame.get('index', idx)
+                        image_url = f"/api/storyboard/{storyboard_job_id}/frame/{frame_index}"
+                        s3_key = frame.get('image_s3_key')
+                        if s3_key:
+                            fresh_url = uploader.generate_presigned_url_for_frame(s3_key)
+                            if fresh_url:
+                                image_url = fresh_url
+                        valid_frames.append({
+                            "index": frame_index,
+                            "timestamp": frame.get('timestamp', 0),
+                            "time_str": frame.get('time_str', '00:00'),
+                            "image_url": image_url,
+                            "keywords": frame.get('keywords', [])
+                        })
+                    if valid_frames:
+                        return {"frames": valid_frames}
     
     # If job not found in job manager, try to find it in saved files metadata
     if not status:
@@ -1067,7 +1305,11 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
         # Send initial status if available
         job_status = job_manager.get_job_status(job_id)
         if job_status:
-            await websocket.send_json(job_status)
+            try:
+                await websocket.send_json(job_status)
+            except (ConnectionResetError, OSError) as e:
+                # Client disconnected abruptly - this is normal, just exit
+                return
         
         # Keep connection alive and forward updates
         last_status = None
@@ -1076,7 +1318,11 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
             try:
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=0.5)
                 # Echo back or handle client messages if needed
-                await websocket.send_json({"type": "pong", "data": data})
+                try:
+                    await websocket.send_json({"type": "pong", "data": data})
+                except (ConnectionResetError, OSError):
+                    # Client disconnected - exit gracefully
+                    return
             except asyncio.TimeoutError:
                 # Poll for status updates frequently
                 job_status = job_manager.get_job_status(job_id)
@@ -1084,8 +1330,12 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                     # Only send if status changed to avoid spam
                     status_key = (job_status.get("stage"), job_status.get("percent"))
                     if status_key != last_status:
-                        await websocket.send_json(job_status)
-                        last_status = status_key
+                        try:
+                            await websocket.send_json(job_status)
+                            last_status = status_key
+                        except (ConnectionResetError, OSError):
+                            # Client disconnected - exit gracefully
+                            return
                     
                     # Check if job is complete or error
                     if job_status.get("stage") in ["complete", "error", "cancelled"]:
@@ -1095,8 +1345,13 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                 continue
     
     except WebSocketDisconnect:
+        # Normal disconnection - no error
+        pass
+    except (ConnectionResetError, OSError) as e:
+        # Client disconnected abruptly - this is normal on Windows, suppress error
         pass
     except Exception as e:
+        # Only log unexpected errors
         print(f"WebSocket error for job {job_id}: {e}")
     finally:
         job_manager.unregister_websocket(job_id, websocket)
@@ -1109,6 +1364,26 @@ async def get_job_status(job_id: str):
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
     return status
+
+
+@app.get("/api/jobs")
+async def get_all_jobs(include_completed: bool = False):
+    """Get all active jobs (or all jobs including completed if include_completed=true)."""
+    try:
+        loop = asyncio.get_event_loop()
+        executor = get_executor()
+        jobs = await loop.run_in_executor(
+            executor,
+            job_manager.get_all_jobs,
+            include_completed
+        )
+        return {
+            "jobs": jobs,
+            "count": len(jobs),
+            "active_count": len([j for j in jobs if j.get("stage") not in ["complete", "error", "cancelled"]])
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get jobs: {str(e)}")
 
 
 @app.get("/api/video/{job_id}")
@@ -1260,12 +1535,16 @@ class FileMetadataRequest(BaseModel):
     video_height: Optional[int] = None
     thumbnail_url: Optional[str] = None
     playlist_id: Optional[str] = None
+    is_public: Optional[int] = 0  # 0 = private, 1 = public
     created_at: Optional[str] = None
 
 
 @app.post("/api/files")
-async def save_file_metadata(request: FileMetadataRequest):
-    """Save file metadata to JSON storage."""
+async def save_file_metadata(
+    request: FileMetadataRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Save file metadata to JSON storage. Requires authentication."""
     try:
         # Extract S3 key from URL if not provided
         s3_key = request.metadata.get("s3_key")
@@ -1275,6 +1554,11 @@ async def save_file_metadata(request: FileMetadataRequest):
             # Try to extract S3 key from URL
             uploader = S3Uploader()
             s3_key = uploader.extract_s3_key_from_url(request.s3_url)
+        
+        # Extract thumbnail_key from thumbnail_url if not in metadata
+        if not thumbnail_key and request.thumbnail_url:
+            uploader = S3Uploader()
+            thumbnail_key = uploader.extract_s3_key_from_url(request.thumbnail_url)
         
         # Clean metadata - remove storyboard frames if this is a split video
         # (frames will be generated fresh for the clip via storyboard_job_id)
@@ -1299,6 +1583,8 @@ async def save_file_metadata(request: FileMetadataRequest):
             "thumbnail_url": request.thumbnail_url,
             "thumbnail_key": thumbnail_key,
             "playlist_id": request.playlist_id,  # Store playlist ID
+            "user_id": current_user["id"],  # Set owner to current user
+            "is_public": request.is_public or 0,  # Default to private
             "created_at": request.created_at or datetime.now().isoformat()
         }
         file_id = metadata_store.save(metadata_dict)
@@ -1308,18 +1594,80 @@ async def save_file_metadata(request: FileMetadataRequest):
 
 
 @app.get("/api/files")
-async def get_all_files(playlist_id: Optional[str] = None):
-    """Get all saved file metadata with fresh presigned URLs. Optionally filter by playlist_id."""
+async def get_all_files(
+    playlist_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Get all saved file metadata with fresh presigned URLs. 
+    Returns only user's own videos and public videos.
+    Optionally filter by playlist_id."""
     try:
-        files = metadata_store.get_all()
+        # Read metadata file in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        try:
+            from main import get_executor
+            executor = get_executor()
+        except ImportError:
+            executor = None
+        
+        files = await loop.run_in_executor(executor, metadata_store.get_all)
+        
+        # Filter: only user's own videos or public videos
+        # Videos without user_id (old videos) are only shown if they are public
+        user_id = current_user["id"]
+        
+        def is_public_video(f):
+            """Check if video is public (handles int, string, bool, None)."""
+            is_public = f.get("is_public")
+            if is_public is None:
+                return False
+            # Handle different types: int, string, bool
+            if isinstance(is_public, bool):
+                return is_public
+            if isinstance(is_public, str):
+                return is_public == "1" or is_public.lower() == "true"
+            if isinstance(is_public, int):
+                return is_public == 1
+            return False
+        
+        def is_user_video(f):
+            """Check if video belongs to current user."""
+            file_user_id = f.get("user_id")
+            # Only match if both are not None and are equal
+            if file_user_id is None or user_id is None:
+                return False
+            # Convert both to string for comparison to handle type mismatches
+            return str(file_user_id).strip() == str(user_id).strip()
+        
+        # Filter files: only user's own videos or public videos
+        # Strict filtering: videos without user_id are NOT shown unless they are public
+        filtered_files = []
+        for f in files:
+            file_user_id = f.get("user_id")
+            file_is_public = is_public_video(f)
+            is_owner = is_user_video(f)
+            
+            # Include ONLY if:
+            # 1. User owns it (user_id matches), OR
+            # 2. Video is public (is_public == 1)
+            # Videos without user_id that are not public are excluded
+            if is_owner:
+                filtered_files.append(f)
+            elif file_is_public:
+                # Only include public videos (regardless of owner)
+                filtered_files.append(f)
+            # Else: private video that doesn't belong to user - exclude it
+        
+        files = filtered_files
         
         # Filter by playlist if specified
         if playlist_id:
             files = [f for f in files if f.get("playlist_id") == playlist_id]
         uploader = S3Uploader()
         
-        # Generate fresh presigned URLs for each file
-        for file in files:
+        # Generate fresh presigned URLs for each file (async to avoid blocking)
+        async def process_file(file):
+            """Process a single file to generate fresh URLs."""
             s3_key = file.get("s3_key")
             if not s3_key:
                 # Try to extract from old URL (for backward compatibility)
@@ -1327,13 +1675,16 @@ async def get_all_files(playlist_id: Optional[str] = None):
                 if old_url:
                     s3_key = uploader.extract_s3_key_from_url(old_url)
                     if s3_key:
-                        # Save the extracted key for future use
+                        # Store in memory only (don't update file to avoid blocking)
                         file["s3_key"] = s3_key
-                        metadata_store.update(file.get("id"), {"s3_key": s3_key})
             
             if s3_key:
-                # Generate fresh presigned URL
-                fresh_url = uploader.generate_presigned_url_from_key(s3_key)
+                # Generate fresh presigned URL in executor
+                fresh_url = await loop.run_in_executor(
+                    executor,
+                    uploader.generate_presigned_url_from_key,
+                    s3_key
+                )
                 if fresh_url:
                     file["s3_url"] = fresh_url
             
@@ -1345,25 +1696,53 @@ async def get_all_files(playlist_id: Optional[str] = None):
                 if old_thumbnail_url:
                     thumbnail_key = uploader.extract_s3_key_from_url(old_thumbnail_url)
                     if thumbnail_key:
+                        # Store in memory only
                         file["thumbnail_key"] = thumbnail_key
-                        metadata_store.update(file.get("id"), {"thumbnail_key": thumbnail_key})
             
             if thumbnail_key:
-                fresh_thumbnail_url = uploader._generate_presigned_url_thumbnail(thumbnail_key)
+                # Generate fresh thumbnail URL in executor
+                fresh_thumbnail_url = await loop.run_in_executor(
+                    executor,
+                    uploader._generate_presigned_url_thumbnail,
+                    thumbnail_key
+                )
                 if fresh_thumbnail_url:
                     file["thumbnail_url"] = fresh_thumbnail_url
+            
+            return file
+        
+        # Process all files concurrently (but limit concurrency to avoid overwhelming S3)
+        # Process in batches to avoid too many concurrent requests
+        batch_size = 10
+        processed_files = []
+        for i in range(0, len(files), batch_size):
+            batch = files[i:i + batch_size]
+            batch_results = await asyncio.gather(*[process_file(f) for f in batch])
+            processed_files.extend(batch_results)
         
         # Sort by created_at descending (newest first)
-        files.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-        return {"files": files}
+        processed_files.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return {"files": processed_files}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load files: {str(e)}")
 
 
 @app.delete("/api/files/{file_id}")
-async def delete_file(file_id: str):
-    """Delete a file from metadata storage."""
+async def delete_file(
+    file_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Delete a file from metadata storage. Only owner can delete."""
     try:
+        # Check if file exists and user is the owner
+        file_data = metadata_store.get_by_id(file_id)
+        if not file_data:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if user is the owner
+        if file_data.get("user_id") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="You can only delete your own files")
+        
         success = metadata_store.delete(file_id)
         if success:
             return {"message": "File deleted successfully"}
@@ -1377,15 +1756,24 @@ async def delete_file(file_id: str):
 
 class UpdateFileRequest(BaseModel):
     title: Optional[str] = None
+    is_public: Optional[bool] = None
 
 
 @app.put("/api/files/{file_id}")
-async def update_file(file_id: str, request: UpdateFileRequest):
-    """Update file metadata (e.g., title)."""
+async def update_file(
+    file_id: str, 
+    request: UpdateFileRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Update file metadata (e.g., title, is_public). Only owner can update."""
     try:
         file_data = metadata_store.get_by_id(file_id)
         if not file_data:
             raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if user is the owner
+        if file_data.get("user_id") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="You can only update your own files")
         
         updates = {}
         if request.title is not None:
@@ -1393,6 +1781,9 @@ async def update_file(file_id: str, request: UpdateFileRequest):
             metadata = file_data.get("metadata", {})
             metadata["title"] = request.title
             updates["metadata"] = metadata
+        
+        if request.is_public is not None:
+            updates["is_public"] = 1 if request.is_public else 0
         
         if updates:
             success = metadata_store.update(file_id, updates)
@@ -1875,27 +2266,6 @@ async def process_convert(
             
             # Success
             job_manager.complete_job(job_id, s3_url_new, new_metadata)
-            
-            # Automatically save converted video to metadata store
-            try:
-                from datetime import datetime
-                metadata_dict = {
-                    "s3_url": s3_url_new,
-                    "s3_key": s3_key,
-                    "job_id": job_id,
-                    "metadata": new_metadata,
-                    "video_width": 1920,
-                    "video_height": 1080,
-                    "thumbnail_url": thumbnail_url,
-                    "thumbnail_key": thumbnail_key,
-                    "playlist_id": None,  # Converted videos are not auto-assigned to playlists
-                    "created_at": datetime.now().isoformat()
-                }
-                file_id = metadata_store.save(metadata_dict)
-                print(f"Auto-saved converted video to metadata store with ID: {file_id}")
-            except Exception as e:
-                # Don't fail the main job if auto-save fails
-                print(f"Warning: Failed to auto-save converted video: {e}")
             
             # Automatically generate storyboard after successful upload
             try:

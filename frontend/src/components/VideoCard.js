@@ -6,9 +6,17 @@ import { formatDuration } from '../utils/timeUtils';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
-const VideoCard = ({ file, onPlay, onDelete, onTitleUpdate }) => {
+const VideoCard = ({ file, onPlay, onDelete, onTitleUpdate, user }) => {
+  // Debug: log file and user info
+  if (!file.user_id) {
+    console.log('VideoCard: file.user_id is missing', file);
+  }
+  if (!user) {
+    console.log('VideoCard: user is missing');
+  }
   const [editingTitleId, setEditingTitleId] = useState(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [isUpdatingPublic, setIsUpdatingPublic] = useState(false);
 
   const handleSaveTitle = async (fileId) => {
     if (!editingTitle.trim()) {
@@ -32,6 +40,25 @@ const VideoCard = ({ file, onPlay, onDelete, onTitleUpdate }) => {
 
   const handleOpenVideo = (s3Url) => {
     window.open(s3Url, '_blank');
+  };
+
+  const handleTogglePublic = async () => {
+    if (isUpdatingPublic) return;
+    
+    const newPublicStatus = !file.is_public;
+    setIsUpdatingPublic(true);
+    
+    try {
+      await axios.put(`${API_BASE_URL}/api/files/${file.id}`, {
+        is_public: newPublicStatus
+      });
+      if (onTitleUpdate) onTitleUpdate(); // Refresh the list
+    } catch (err) {
+      console.error('Error updating public status:', err);
+      alert('تغییر وضعیت انتشار با خطا مواجه شد');
+    } finally {
+      setIsUpdatingPublic(false);
+    }
   };
 
   const title = file.metadata?.title || 'ویدیو بدون عنوان';
@@ -159,15 +186,35 @@ const VideoCard = ({ file, onPlay, onDelete, onTitleUpdate }) => {
               <path d="M14,3V5H17.59L7.76,14.83L9.17,16.24L19,6.41V10H21V3M19,19H5V5H12V3H5C3.89,3 3,3.9 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V12H19V19Z"/>
             </svg>
           </button>
-          <button 
-            onClick={() => onDelete(file.id)}
-            className="video-action-btn delete-action"
-            title="حذف"
-          >
-            <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-              <path d="M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z"/>
-            </svg>
-          </button>
+          {user && file.user_id && file.user_id === user.id && (
+            <button 
+              onClick={handleTogglePublic}
+              className={`video-action-btn ${file.is_public ? 'public-action' : 'private-action'}`}
+              title={file.is_public ? 'عمومی - کلیک برای خصوصی کردن' : 'خصوصی - کلیک برای عمومی کردن'}
+              disabled={isUpdatingPublic}
+            >
+              {file.is_public ? (
+                <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                  <path d="M12,17A2,2 0 0,0 14,15C14,13.89 13.1,13 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17M18,8H17V6A5,5 0 0,0 7,6H9A3,3 0 0,1 12,3A3,3 0 0,1 15,6V8H18A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V10A2,2 0 0,1 6,8Z"/>
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                  <path d="M12,17A2,2 0 0,0 14,15C14,13.89 13.1,13 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V10C4,8.89 4.9,8 6,8H7V6A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,3A3,3 0 0,0 9,6V8H15V6A3,3 0 0,0 12,3Z"/>
+                </svg>
+              )}
+            </button>
+          )}
+          {user && file.user_id && file.user_id === user.id && (
+            <button 
+              onClick={() => onDelete(file.id)}
+              className="video-action-btn delete-action"
+              title="حذف"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                <path d="M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z"/>
+              </svg>
+            </button>
+          )}
         </div>
       </div>
     </div>

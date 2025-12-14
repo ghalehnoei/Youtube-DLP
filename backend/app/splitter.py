@@ -251,8 +251,14 @@ class VideoSplitter:
         
         # Run FFmpeg in thread pool
         loop = asyncio.get_event_loop()
+        # Try to use shared executor from main if available, otherwise use default
+        try:
+            from main import get_executor
+            executor = get_executor()
+        except ImportError:
+            executor = None
         result = await loop.run_in_executor(
-            None,
+            executor,
             self._split_sync,
             cmd,
             progress_callback,

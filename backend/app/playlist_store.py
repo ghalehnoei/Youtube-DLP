@@ -1,98 +1,143 @@
 """
-Playlist storage using JSON file.
+Playlist storage using database (PostgreSQL, MySQL, or SQLite) or Supabase Data API.
 """
-import json
-import os
-from pathlib import Path
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
+from app.database import get_session, Playlist
+from sqlalchemy.orm import Session as SQLSession
+from app.supabase_store import SupabaseStore
 
 
 class PlaylistStore:
-    """Manages playlist storage in JSON file."""
+    """Manages playlist storage in database or Supabase."""
     
-    def __init__(self, storage_file: str = "playlists.json"):
-        # Store in backend directory
-        backend_dir = Path(__file__).parent.parent
-        self.storage_file = backend_dir / storage_file
-        self._ensure_storage_file()
+    def __init__(self):
+        """Initialize playlist store."""
+        self.supabase_store = SupabaseStore()
+        self.use_supabase = self.supabase_store.is_available()
+        if self.use_supabase:
+            print("Using Supabase Data API for playlist storage")
+        else:
+            print("Using local database (SQLite/PostgreSQL/MySQL) for playlist storage")
     
-    def _ensure_storage_file(self):
-        """Ensure the storage file exists."""
-        if not self.storage_file.exists():
-            self._write_data([])
-    
-    def _read_data(self) -> List[Dict]:
-        """Read data from JSON file."""
-        try:
-            if self.storage_file.exists():
-                with open(self.storage_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return []
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Error reading playlist file: {e}")
-            return []
-    
-    def _write_data(self, data: List[Dict]):
-        """Write data to JSON file."""
-        try:
-            with open(self.storage_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except IOError as e:
-            print(f"Error writing playlist file: {e}")
-            raise
+    def _to_dict(self, playlist: Playlist) -> Dict:
+        """Convert database model to dictionary."""
+        return {
+            "id": playlist.id,
+            "title": playlist.title,
+            "description": playlist.description or "",
+            "publish_status": playlist.publish_status,
+            "created_at": playlist.created_at.isoformat() if playlist.created_at else None,
+            "updated_at": playlist.updated_at.isoformat() if playlist.updated_at else None
+        }
     
     def create(self, title: str, description: Optional[str] = None, publish_status: str = "private") -> str:
         """Create a new playlist and return the playlist ID."""
-        data = self._read_data()
+        if self.use_supabase:
+            return self.supabase_store.create_playlist(title, description, publish_status)
         
-        playlist_id = str(uuid.uuid4())
-        playlist_data = {
-            "id": playlist_id,
-            "title": title,
-            "description": description or "",
-            "publish_status": publish_status,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
-        
-        data.append(playlist_data)
-        self._write_data(data)
-        
-        return playlist_id
+        db: SQLSession = get_session()
+        try:
+            playlist_id = str(uuid.uuid4())
+            playlist = Playlist(
+                id=playlist_id,
+                title=title,
+                description=description or "",
+                publish_status=publish_status,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc)
+            )
+            
+            db.add(playlist)
+            db.commit()
+            db.refresh(playlist)
+            
+            return playlist_id
+        except Exception as e:
+            db.rollback()
+            print(f"Error creating playlist: {e}")
+            raise
+        finally:
+            db.close()
     
     def get_all(self) -> List[Dict]:
         """Get all playlists."""
-        return self._read_data()
+        if self.use_supabase:
+            return self.supabase_store.get_all_playlists()
+        
+        db: SQLSession = get_session()
+        try:
+            playlists = db.query(Playlist).order_by(Playlist.created_at.desc()).all()
+            return [self._to_dict(p) for p in playlists]
+        except Exception as e:
+            print(f"Error getting all playlists: {e}")
+            return []
+        finally:
+            db.close()
     
     def get_by_id(self, playlist_id: str) -> Optional[Dict]:
         """Get a playlist by ID."""
-        data = self._read_data()
-        for playlist in data:
-            if playlist.get("id") == playlist_id:
-                return playlist
-        return None
+        if self.use_supabase:
+            return self.supabase_store.get_playlist_by_id(playlist_id)
+        
+        db: SQLSession = get_session()
+        try:
+            playlist = db.query(Playlist).filter(Playlist.id == playlist_id).first()
+            if playlist:
+                return self._to_dict(playlist)
+            return None
+        except Exception as e:
+            print(f"Error getting playlist by ID: {e}")
+            return None
+        finally:
+            db.close()
     
     def update(self, playlist_id: str, updates: Dict) -> bool:
         """Update playlist data."""
-        data = self._read_data()
-        for playlist in data:
-            if playlist.get("id") == playlist_id:
-                playlist.update(updates)
-                playlist["updated_at"] = datetime.now().isoformat()
-                self._write_data(data)
-                return True
-        return False
+        if self.use_supabase:
+            return self.supabase_store.update_playlist(playlist_id, updates)
+        
+        db: SQLSession = get_session()
+        try:
+            playlist = db.query(Playlist).filter(Playlist.id == playlist_id).first()
+            if not playlist:
+                return False
+            
+            if "title" in updates:
+                playlist.title = updates["title"]
+            if "description" in updates:
+                playlist.description = updates["description"]
+            if "publish_status" in updates:
+                playlist.publish_status = updates["publish_status"]
+            
+            playlist.updated_at = datetime.now(timezone.utc)
+            
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"Error updating playlist: {e}")
+            return False
+        finally:
+            db.close()
     
     def delete(self, playlist_id: str) -> bool:
         """Delete a playlist by ID."""
-        data = self._read_data()
-        original_length = len(data)
-        data = [p for p in data if p.get("id") != playlist_id]
+        if self.use_supabase:
+            return self.supabase_store.delete_playlist(playlist_id)
         
-        if len(data) < original_length:
-            self._write_data(data)
-            return True
-        return False
-
+        db: SQLSession = get_session()
+        try:
+            playlist = db.query(Playlist).filter(Playlist.id == playlist_id).first()
+            if playlist:
+                db.delete(playlist)
+                db.commit()
+                return True
+            return False
+        except Exception as e:
+            db.rollback()
+            print(f"Error deleting playlist: {e}")
+            return False
+        finally:
+            db.close()

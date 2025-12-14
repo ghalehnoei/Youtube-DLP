@@ -40,15 +40,20 @@ const VideoPlayer = ({
   // OR if we have jobId but no status yet (connecting)
   const isProcessing = jobId && status && status.stage !== 'complete' && status.stage !== 'error' && status.stage !== 'cancelled';
   const isConnecting = jobId && !status;
+  const isVertical = videoHeight && videoWidth && videoHeight > videoWidth;
   
   // Debug logging
   if (jobId) {
     console.log('VideoPlayer render:', { jobId, status, isProcessing, isConnecting, isComplete });
   }
 
+  const playerContentClass = (isProcessing || isConnecting)
+    ? "player-content loading"
+    : "player-content";
+
   return (
     <div className="player-page-wrapper">
-      <div className="player-content">
+      <div className={playerContentClass}>
         <>
           {/* Show status during conversion */}
           {(isProcessing || isConnecting) && (
@@ -71,10 +76,10 @@ const VideoPlayer = ({
                 {s3Url && !isProcessing ? (
                   <div 
                     ref={videoContainerRef}
-                    className="dash-video-container"
+                    className={`dash-video-container ${isVertical ? 'vertical-player' : ''}`}
                   />
                 ) : s3Url && isProcessing ? (
-                  <div className="video-placeholder">
+                  <div className={`video-placeholder ${isVertical ? 'vertical-player' : ''}`}>
                     <div className="video-placeholder-content">
                       <div className="loading-spinner"></div>
                       <p>در حال تبدیل ویدیو...</p>
@@ -148,16 +153,6 @@ const VideoPlayer = ({
             )}
             
             <div className="player-footer">
-              <button 
-                onClick={onBack}
-                className="back-to-main-btn"
-                title="بازگشت به ویدیوهای ذخیره شده"
-              >
-                <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-                  <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
-                </svg>
-                <span>بازگشت به ویدیوهای ذخیره شده</span>
-              </button>
             </div>
           </div>
 

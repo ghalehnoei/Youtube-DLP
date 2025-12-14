@@ -207,13 +207,26 @@ class VideoDownloader:
         
         try:
             # Run download in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            file_path = await loop.run_in_executor(
-                None,
-                self._download_sync,
-                url,
-                ydl_opts
-            )
+            # Try to use shared executor from main if available, otherwise use default
+            try:
+                from main import get_executor
+                executor = get_executor()
+                loop = asyncio.get_event_loop()
+                file_path = await loop.run_in_executor(
+                    executor,
+                    self._download_sync,
+                    url,
+                    ydl_opts
+                )
+            except ImportError:
+                # Fallback to default executor if main module not available
+                loop = asyncio.get_event_loop()
+                file_path = await loop.run_in_executor(
+                    None,
+                    self._download_sync,
+                    url,
+                    ydl_opts
+                )
             
             return file_path
         

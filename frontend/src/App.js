@@ -10,6 +10,8 @@ import DownloadForm from './components/DownloadForm';
 import StatusDisplay from './components/StatusDisplay';
 import PlaylistModal from './components/PlaylistModal';
 import MainLayout from './components/MainLayout';
+import ActiveJobsList from './components/ActiveJobsList';
+import LoginForm from './components/LoginForm';
 
 // Hooks
 import { useWebSocket } from './hooks/useWebSocket';
@@ -47,9 +49,63 @@ function App() {
   const [showCreatePlaylist, setShowCreatePlaylist] = useState(false);
   const [selectedPlaylistFilter, setSelectedPlaylistFilter] = useState(null);
   const [isConverting, setIsConverting] = useState(false);
+  const [showActiveJobs, setShowActiveJobs] = useState(false);
+  const [user, setUser] = useState(null);
+  const [token, setToken] = useState(null);
 
   // Track auto-saved job IDs to prevent duplicate saves
   const autoSavedJobIdsRef = useRef(new Set());
+
+  // Check for existing authentication on mount
+  useEffect(() => {
+    const storedToken = localStorage.getItem('access_token');
+    const storedUser = localStorage.getItem('user');
+    
+    if (storedToken && storedUser) {
+      try {
+        const userData = JSON.parse(storedUser);
+        setToken(storedToken);
+        setUser(userData);
+        
+        // Set default axios authorization header
+        axios.defaults.headers.common['Authorization'] = `Bearer ${storedToken}`;
+        
+        // Verify token is still valid
+        axios.get(`${API_BASE_URL}/api/auth/me`)
+          .then(response => {
+            setUser(response.data);
+          })
+          .catch(() => {
+            // Token invalid, clear storage
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('user');
+            setToken(null);
+            setUser(null);
+            delete axios.defaults.headers.common['Authorization'];
+          });
+      } catch (e) {
+        console.error('Error parsing stored user:', e);
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user');
+      }
+    }
+  }, []);
+
+  // Handle successful login
+  const handleLoginSuccess = (userData, accessToken) => {
+    setUser(userData);
+    setToken(accessToken);
+    axios.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
+  };
+
+  // Handle logout
+  const handleLogout = () => {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('user');
+    setUser(null);
+    setToken(null);
+    delete axios.defaults.headers.common['Authorization'];
+  };
 
   // Custom hooks
   const handleVideoLoadedMetadata = (e) => {
@@ -98,7 +154,7 @@ function App() {
       // Keep isConverting true during conversion process
       setIsConverting(true);
     }
-  }, []);
+  }, [jobId]);
 
   const handleWebSocketError = useCallback((errorMsg) => {
     setError(errorMsg);
@@ -224,11 +280,15 @@ function App() {
     autoSavedJobIdsRef.current.clear();
   };
 
-  const handleBackToMain = () => {
+  const handleHome = () => {
+    console.log('handleHome called');
+    // Reset to home state
     handleReset();
-    if (savedFiles.length > 0) {
-      setShowNewDownload(false);
-    }
+    setShowNewDownload(false);
+    setShowActiveJobs(false);
+    // Force re-render by clearing any active states
+    setUrl('');
+    setError(null);
   };
 
   // Auto-save when download is complete
@@ -244,14 +304,21 @@ function App() {
       }
       
       try {
+        // Get video dimensions from metadata if not already set from video element
+        // This ensures horizontal videos are saved even if videoWidth/videoHeight state isn't set
+        const width = videoWidth || status.metadata?.width || null;
+        const height = videoHeight || status.metadata?.height || null;
+        
         const metadata = {
           s3_url: s3Url,
           job_id: jobId,
           metadata: status.metadata,
-          video_width: videoWidth,
-          video_height: videoHeight,
+          video_width: width,
+          video_height: height,
           thumbnail_url: status.metadata?.thumbnail_url || null,
+          // thumbnail_key is stored in metadata and will be extracted by backend
           playlist_id: null, // Auto save without playlist
+          is_public: 0, // Default to private
           created_at: new Date().toISOString()
         };
         
@@ -274,7 +341,8 @@ function App() {
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [s3Url, status, jobId, videoWidth, videoHeight, loadSavedFiles]);
+  }, [s3Url, status, jobId, loadSavedFiles]); // eslint-disable-line react-hooks/exhaustive-deps
+  // videoWidth and videoHeight intentionally excluded - we get dimensions from metadata instead
 
   const handleConfirmSave = async () => {
     if (!s3Url || !status || !status.metadata) return;
@@ -404,33 +472,71 @@ function App() {
     }
   };
 
-  const showSavedFiles = savedFiles.length > 0 && !showNewDownload && !jobId && !status && !s3Url;
-  // Show download form when: (no saved files OR new download clicked) AND job is not complete
+  const showMainLayout = (savedFiles.length > 0 || showActiveJobs) && !showNewDownload && !jobId && !status && !s3Url;
   const isJobComplete = status && status.stage === 'complete';
-  const showDownloadForm = (!savedFiles.length || showNewDownload) && !isJobComplete;
-  // Show video player when: has URL or S3 URL AND status is complete AND no error
-  const showVideoPlayer = (url.trim() || s3Url) && isJobComplete && !error;
+  const isJobInProgress = jobId && status && (status.stage === 'download' || status.stage === 'upload' || status.stage === 'connecting');
+  // Show download form when: (no saved files OR new download clicked) AND job is not complete AND no active job
+  const showDownloadForm = (!savedFiles.length || showNewDownload) && !isJobComplete && !jobId && !showActiveJobs;
+  // Show video player when there is a job in progress or a completed job (or s3Url/url ready) and no hard error
+  const showVideoPlayer = ((url.trim() || s3Url || jobId) && (isJobComplete || isJobInProgress || status)) && !error;
+
+  // Show login form if user is not authenticated
+  if (!user || !token) {
+    return <LoginForm onLoginSuccess={handleLoginSuccess} />;
+  }
 
   return (
     <div className="App">
-      {showSavedFiles && (
+      {showMainLayout && (
         <MainLayout
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onNewDownload={() => setShowNewDownload(true)}
+          showActiveJobs={showActiveJobs}
+          onToggleActiveJobs={() => setShowActiveJobs(!showActiveJobs)}
+          user={user}
+          onLogout={handleLogout}
+          onHome={handleHome}
         >
-          <SavedFilesList
-            savedFiles={savedFiles}
-            searchQuery={searchQuery}
-            selectedPlaylistFilter={selectedPlaylistFilter}
-            playlists={playlists}
-            onPlay={handleOpenPlayer}
-            onDelete={handleDeleteFile}
-            onTitleUpdate={loadSavedFiles}
-            onNewDownload={() => setShowNewDownload(true)}
-            onFilterChange={setSelectedPlaylistFilter}
-            onSearchChange={setSearchQuery}
-          />
+          {showActiveJobs ? (
+            <ActiveJobsList
+              onJobClick={(job) => {
+                if (job.s3_url) {
+                  setS3Url(job.s3_url);
+                  setJobId(job.jobId);
+                  setStatus({
+                    stage: job.stage,
+                    percent: job.percent,
+                    message: job.message,
+                    metadata: job.metadata,
+                    s3_url: job.s3_url
+                  });
+                  setShowActiveJobs(false);
+                }
+              }}
+              onCancelJob={(cancelledJobId) => {
+                if (cancelledJobId === jobId) {
+                  setJobId(null);
+                  setStatus(null);
+                  setS3Url(null);
+                }
+              }}
+            />
+          ) : (
+            <SavedFilesList
+              savedFiles={savedFiles}
+              searchQuery={searchQuery}
+              selectedPlaylistFilter={selectedPlaylistFilter}
+              playlists={playlists}
+              onPlay={handleOpenPlayer}
+              user={user}
+              onDelete={handleDeleteFile}
+              onTitleUpdate={loadSavedFiles}
+              onNewDownload={() => setShowNewDownload(true)}
+              onFilterChange={setSelectedPlaylistFilter}
+              onSearchChange={setSearchQuery}
+            />
+          )}
         </MainLayout>
       )}
 
@@ -440,6 +546,7 @@ function App() {
           onSearchChange={() => {}}
           onNewDownload={() => {}}
           showSidebar={false}
+          onHome={handleHome}
         >
           <div className="download-page-content">
             {/* Show error if exists and no active job */}
@@ -490,8 +597,6 @@ function App() {
                 onSubmit={handleSubmit}
                 onFileUpload={handleFileUpload}
                 fileUploadName={fileUploadName}
-                showBackButton={savedFiles.length > 0}
-                onBack={handleBackToMain}
               />
             )}
           </div>
@@ -504,6 +609,7 @@ function App() {
           onSearchChange={() => {}}
           onNewDownload={() => {}}
           showSidebar={false}
+          onHome={handleHome}
         >
           {error && (
             <div className="error-box">
@@ -526,7 +632,7 @@ function App() {
               jobId={jobId}
               videoContainerRef={videoContainerRef}
               storyboardFrames={storyboardFrames}
-              onBack={handleBackToMain}
+              onBack={handleHome}
               onSeek={seekToTimestamp}
               onConvert={handleConvert}
               isConverting={isConverting}

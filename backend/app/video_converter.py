@@ -263,32 +263,58 @@ class VideoConverter:
                 '-i', input_file_path,
             ]
             
-            # Calculate scale and pad to fit 1920x1080
-            # Maintain aspect ratio, center the video
+            filter_args = []
+            # Calculate scale to fit 1920x1080
+            # For vertical videos, avoid black bars by using blurred background
             if width and height:
-                # Calculate scale to fit within target dimensions
-                scale_ratio_w = target_width / width
-                scale_ratio_h = target_height / height
-                scale_ratio = min(scale_ratio_w, scale_ratio_h)  # Use smaller ratio to fit
+                is_vertical = height > width
                 
-                scaled_width = int(width * scale_ratio)
-                scaled_height = int(height * scale_ratio)
-                
-                # Calculate padding (letterboxing/pillarboxing)
-                pad_x = (target_width - scaled_width) // 2
-                pad_y = (target_height - scaled_height) // 2
-                
-                # Video filter: scale and pad
-                vf = f"scale={scaled_width}:{scaled_height},pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
+                if is_vertical:
+                    # Build a two-layer filter:
+                    # 1) Background: scale to fill 1920x1080 then crop (no black bars), then blur
+                    # 2) Foreground: scale to fit height 1080 with aspect ratio, overlay centered
+                    vf = (
+                        # Background: fill frame and blur
+                        "[0:v]scale={w_bg}:{h_bg}:force_original_aspect_ratio=increase,crop={w_bg}:{h_bg},boxblur=luma_radius=40:luma_power=2[bg];"
+                        # Foreground: keep aspect ratio, fit height
+                        "[0:v]scale=-1:{h_fg}:force_original_aspect_ratio=decrease[fg];"
+                        # Overlay foreground centered on blurred background
+                        "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[outv]"
+                    ).format(
+                        w_bg=target_width,
+                        h_bg=target_height,
+                        h_fg=target_height,
+                    )
+                    filter_args = [
+                        "-filter_complex", vf,
+                        "-map", "[outv]",          # Final mixed video
+                        "-map", "0:a?",            # Keep audio if exists
+                    ]
+                else:
+                    # Horizontal video: simple fit with pad
+                    scale_ratio_w = target_width / width
+                    scale_ratio_h = target_height / height
+                    scale_ratio = min(scale_ratio_w, scale_ratio_h)
+                    
+                    scaled_width = int(width * scale_ratio)
+                    scaled_height = int(height * scale_ratio)
+                    
+                    pad_x = (target_width - scaled_width) // 2
+                    pad_y = (target_height - scaled_height) // 2
+                    
+                    vf = f"scale={scaled_width}:{scaled_height},pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
+                    filter_args = ['-vf', vf]
             else:
                 # If dimensions unknown, use scale to fit
                 vf = f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black"
+                filter_args = ['-vf', vf]
             
+            cmd.extend(filter_args)
             cmd.extend([
-                '-vf', vf,
                 '-c:v', 'libx264',
                 '-preset', 'medium',
                 '-crf', '23',
+                '-r', '25',
                 '-c:a', 'aac',
                 '-b:a', '128k',
                 '-movflags', '+faststart',  # Web optimization
@@ -298,8 +324,14 @@ class VideoConverter:
             # Run FFmpeg conversion
             print(f"Running FFmpeg conversion command...")
             loop = asyncio.get_event_loop()
+            # Try to use shared executor from main if available, otherwise use default
+            try:
+                from main import get_executor
+                executor = get_executor()
+            except ImportError:
+                executor = None
             result = await loop.run_in_executor(
-                None,
+                executor,
                 self._run_ffmpeg,
                 cmd,
                 progress_callback,

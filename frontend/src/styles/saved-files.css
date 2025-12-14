@@ -110,17 +110,18 @@
 }
 
 .vertical-videos-grid {
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
 }
 
-/* Vertical videos - display as smaller thumbnails */
+/* Vertical videos - display larger to fill row */
 .saved-video-card.vertical-video {
-  max-width: 180px;
-  margin: 0 auto;
+  max-width: 100%;
+  margin: 0;
 }
 
 .saved-video-card.vertical-video .video-thumbnail-container {
-  padding-bottom: 177.78%; /* 16:9 aspect ratio for vertical videos (height/width) */
+  padding-bottom: 177.78%; /* 9:16 aspect ratio */
   border-radius: 12px;
 }
 
@@ -129,6 +130,7 @@
   object-fit: cover;
   width: 100%;
   height: 100%;
+  border-radius: 12px;
 }
 
 /* Vertical video specific styles */

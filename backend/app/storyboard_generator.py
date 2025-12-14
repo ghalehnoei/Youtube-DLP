@@ -112,19 +112,17 @@ class StoryboardGenerator:
         
         return None
     
-    def detect_scene_changes(
+    def _detect_scene_changes_sync(
         self,
         video_path: str,
-        threshold: float = 0.3,
-        progress_callback: Optional[Callable] = None
+        threshold: float = 0.3
     ) -> List[float]:
         """
-        Detect scene changes in video using FFmpeg's scene filter.
+        Synchronous version of scene change detection (runs in executor).
         
         Args:
             video_path: Path to video file (can be local file or URL)
             threshold: Scene change detection threshold (0.0-1.0, default: 0.3)
-            progress_callback: Optional callback function(percent, message)
         
         Returns:
             List of timestamps (in seconds) where scene changes occur
@@ -135,9 +133,6 @@ class StoryboardGenerator:
         scene_times = []
         
         try:
-            if progress_callback:
-                progress_callback(10, "Detecting scene changes...")
-            
             # Use FFmpeg's select filter to detect scene changes
             # The select filter with 'gt(scene,threshold)' outputs frames where scene change > threshold
             cmd = [
@@ -179,6 +174,51 @@ class StoryboardGenerator:
                 if t - filtered_times[-1] >= 0.1:  # At least 0.1 seconds apart
                     filtered_times.append(t)
             scene_times = filtered_times
+            
+            return scene_times
+            
+        except Exception as e:
+            print(f"Error detecting scene changes: {e}")
+            return []
+    
+    async def detect_scene_changes(
+        self,
+        video_path: str,
+        threshold: float = 0.3,
+        progress_callback: Optional[Callable] = None
+    ) -> List[float]:
+        """
+        Detect scene changes in video using FFmpeg's scene filter.
+        
+        Args:
+            video_path: Path to video file (can be local file or URL)
+            threshold: Scene change detection threshold (0.0-1.0, default: 0.3)
+            progress_callback: Optional callback function(percent, message)
+        
+        Returns:
+            List of timestamps (in seconds) where scene changes occur
+        """
+        if not self.ffmpeg_path:
+            return []
+        
+        try:
+            if progress_callback:
+                progress_callback(10, "Detecting scene changes...")
+            
+            # Run blocking operation in executor
+            loop = asyncio.get_event_loop()
+            try:
+                from main import get_executor
+                executor = get_executor()
+            except ImportError:
+                executor = None
+            
+            scene_times = await loop.run_in_executor(
+                executor,
+                self._detect_scene_changes_sync,
+                video_path,
+                threshold
+            )
             
             if progress_callback:
                 progress_callback(30, f"Found {len(scene_times)} scene changes")
@@ -264,7 +304,13 @@ class StoryboardGenerator:
                         check=False
                     )
                 
-                result = await loop.run_in_executor(None, run_ffmpeg)
+                # Try to use shared executor from main if available, otherwise use default
+                try:
+                    from main import get_executor
+                    executor = get_executor()
+                except ImportError:
+                    executor = None
+                result = await loop.run_in_executor(executor, run_ffmpeg)
                 
                 if result.returncode == 0 and os.path.exists(output_path):
                     frames.append({
@@ -589,7 +635,7 @@ class StoryboardGenerator:
         os.makedirs(frames_dir, exist_ok=True)
         
         # Detect scene changes
-        scene_times = self.detect_scene_changes(video_path, threshold, progress_callback)
+        scene_times = await self.detect_scene_changes(video_path, threshold, progress_callback)
         
         if not scene_times:
             if progress_callback:

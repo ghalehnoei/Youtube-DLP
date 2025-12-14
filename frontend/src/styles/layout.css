@@ -56,6 +56,12 @@
   text-decoration: none;
   font-family: 'IranSans', 'Vazir', 'Tahoma', sans-serif;
   transition: color 0.3s ease;
+  cursor: pointer;
+  user-select: none;
+}
+
+.logo:hover {
+  opacity: 0.8;
 }
 
 .dark-mode .logo {

@@ -129,15 +129,30 @@ class S3Uploader:
         
         try:
             # Upload file with progress tracking
-            loop = asyncio.get_event_loop()
-            s3_key = await loop.run_in_executor(
-                None,
-                self._upload_sync,
-                str(file_path),
-                s3_key,
-                file_size,
-                progress_callback
-            )
+            # Try to use shared executor from main if available, otherwise use default
+            try:
+                from main import get_executor
+                executor = get_executor()
+                loop = asyncio.get_event_loop()
+                s3_key = await loop.run_in_executor(
+                    executor,
+                    self._upload_sync,
+                    str(file_path),
+                    s3_key,
+                    file_size,
+                    progress_callback
+                )
+            except ImportError:
+                # Fallback to default executor if main module not available
+                loop = asyncio.get_event_loop()
+                s3_key = await loop.run_in_executor(
+                    None,
+                    self._upload_sync,
+                    str(file_path),
+                    s3_key,
+                    file_size,
+                    progress_callback
+                )
             
             if not s3_key:
                 return None
@@ -303,8 +318,14 @@ class S3Uploader:
         
         try:
             loop = asyncio.get_event_loop()
+            # Try to use shared executor from main if available, otherwise use default
+            try:
+                from main import get_executor
+                executor = get_executor()
+            except ImportError:
+                executor = None
             s3_key = await loop.run_in_executor(
-                None,
+                executor,
                 self._upload_thumbnail_sync,
                 str(thumbnail_path),
                 s3_key,
@@ -478,8 +499,14 @@ class S3Uploader:
         
         try:
             loop = asyncio.get_event_loop()
+            # Try to use shared executor from main if available, otherwise use default
+            try:
+                from main import get_executor
+                executor = get_executor()
+            except ImportError:
+                executor = None
             s3_key = await loop.run_in_executor(
-                None,
+                executor,
                 self._upload_file_sync,
                 str(html_path),
                 s3_key,
@@ -535,8 +562,14 @@ class S3Uploader:
         
         try:
             loop = asyncio.get_event_loop()
+            # Try to use shared executor from main if available, otherwise use default
+            try:
+                from main import get_executor
+                executor = get_executor()
+            except ImportError:
+                executor = None
             s3_key = await loop.run_in_executor(
-                None,
+                executor,
                 self._upload_file_sync,
                 str(frame_path),
                 s3_key,

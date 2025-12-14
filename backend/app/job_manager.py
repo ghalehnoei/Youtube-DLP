@@ -178,7 +178,11 @@ class JobManager:
         for ws in job.websockets:
             try:
                 await ws.send_json(status)
+            except (ConnectionResetError, OSError):
+                # Client disconnected abruptly - this is normal, especially on Windows
+                disconnected.append(ws)
             except Exception as e:
+                # Only log unexpected errors
                 print(f"Error sending to WebSocket: {e}")
                 disconnected.append(ws)
         
@@ -219,6 +223,48 @@ class JobManager:
             if job_id not in self.jobs:
                 return True
             return self.jobs[job_id].cancelled
+    
+    def get_all_jobs(self, include_completed: bool = False) -> List[Dict]:
+        """Get all jobs (active or all including completed)."""
+        with self._lock:
+            jobs_list = []
+            for job in self.jobs.values():
+                # Filter out completed/error/cancelled jobs if not requested
+                if not include_completed and job.stage in ["complete", "error", "cancelled"]:
+                    continue
+                
+                # Generate fresh URL from s3_key if available
+                s3_url = job.s3_url
+                if job.metadata:
+                    s3_key = job.metadata.get('s3_key')
+                    if s3_key:
+                        try:
+                            from app.uploader import S3Uploader
+                            uploader = S3Uploader()
+                            fresh_url = uploader.generate_presigned_url_from_key(s3_key)
+                            if fresh_url:
+                                s3_url = fresh_url
+                        except Exception:
+                            pass
+                
+                jobs_list.append({
+                    "jobId": job.job_id,
+                    "stage": job.stage,
+                    "percent": job.percent,
+                    "message": job.message,
+                    "speed": job.speed,
+                    "eta": job.eta,
+                    "s3_url": s3_url,
+                    "metadata": job.metadata,
+                    "url": job.url,
+                    "created_at": job.created_at.isoformat() if job.created_at else None,
+                    "websocket_count": len(job.websockets),
+                    "cancelled": job.cancelled
+                })
+            
+            # Sort by created_at descending (newest first)
+            jobs_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            return jobs_list
     
     def cleanup_all_jobs(self):
         """Cleanup all jobs (called on shutdown)."""

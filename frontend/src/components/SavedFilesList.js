@@ -12,7 +12,8 @@ const SavedFilesList = ({
   onTitleUpdate,
   onNewDownload,
   onFilterChange,
-  onSearchChange
+  onSearchChange,
+  user
 }) => {
   const filteredFiles = savedFiles.filter(file => {
     if (!searchQuery.trim()) return true;
@@ -77,6 +78,7 @@ const SavedFilesList = ({
                 onPlay={onPlay}
                 onDelete={onDelete}
                 onTitleUpdate={onTitleUpdate}
+                user={user}
               />
             ))}
           </div>
@@ -95,6 +97,7 @@ const SavedFilesList = ({
                 onPlay={onPlay}
                 onDelete={onDelete}
                 onTitleUpdate={onTitleUpdate}
+                user={user}
               />
             ))}
           </div>
